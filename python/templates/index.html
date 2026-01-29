@@ -2,140 +2,508 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Edge Impulse Object Detection Demo</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <title>Edge Impulse: Rubber Ducky Detection</title>
     <style>
-        .settings-panel {
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background-color: #f8f9fa;
-            padding: 15px;
-            border-radius: 5px;
+        }
+        .demo-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header img {
+            height: 60px;
+            margin-bottom: 15px;
+        }
+        .settings-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 20px;
+        }
+        .video-container {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .video-panel {
+            flex: 1;
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+            position: relative;
+            min-height: 450px;
+        }
+        .video-frame {
+            width: 100%;
+            max-height: 400px;
+            object-fit: contain;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            background: #f8f9fa;
+        }
+        .stats {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #6c757d;
+        }
+        .stats-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #212529;
+        }
+        .btn-primary {
+            background-color: #4e73df;
+            border-color: #4e73df;
+        }
+        .form-select, .form-control {
+            border-radius: 4px;
+            border: 1px solid #d1d3e2;
+        }
+        .loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+        }
+        .spinner-border {
+            width: 3rem;
+            height: 3rem;
+        }
+        .error-message {
+            color: #dc3545;
+            font-size: 14px;
+            margin-top: 10px;
+            display: none;
+        }
+        .connection-status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            z-index: 10;
+        }
+        .status-connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status-disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .status-reconnecting {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .asset-preview {
+            max-width: 100px;
+            max-height: 60px;
+            object-fit: contain;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        @media (max-width: 768px) {
+            .video-container {
+                flex-direction: column;
+            }
         }
     </style>
 </head>
 <body>
-  <div class="container col-xxl-8 px-4 py-5">
-    <img class="d-block mx-auto mb-4" src="assets/EI_logo_stacked.png" alt="" width="200">
-    <hr>
+    <div class="demo-container">
+        <div class="header">
+            <img src="assets/EI_logo_stacked.png" alt="Edge Impulse">
+            <h2>Rubber Ducky Detection Demo</h2>
+            <p class="text-muted">Using Edge Impulse and Arduino App Lab</p>
+        </div>
 
-    <!-- Settings Panel -->
-    <div class="settings-panel">
-        <h4>Settings</h4>
-        <div class="mb-3">
-            <label for="sourceSelect" class="form-label">Input Source:</label>
-            <select class="form-select" id="sourceSelect">
-                <option value="image">Image</option>
-                <option value="video">Video</option>
-                <option value="rtsp">RTSP Stream</option>
-            </select>
+        <div class="settings-card">
+            <div class="row align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label">Input Source</label>
+                    <select id="sourceSelect" class="form-select">
+                        <option value="image">Image</option>
+                        <option value="video">Video</option>
+                        <option value="rtsp">RTSP Stream</option>
+                        <option value="camera">Connected Camera</option>
+                    </select>
+                </div>
+                <div class="col-md-3" id="imageSelectGroup">
+                    <label class="form-label">Image</label>
+                    <select id="imageSelect" class="form-select">
+                        <option value="" disabled selected>Loading images...</option>
+                    </select>
+                </div>
+                <div class="col-md-3" id="videoSelectGroup" style="display: none;">
+                    <label class="form-label">Video</label>
+                    <select id="videoSelect" class="form-select">
+                        <option value="" disabled selected>Loading videos...</option>
+                    </select>
+                </div>
+                <div class="col-md-3" id="cameraSelectGroup" style="display: none;">
+                    <label class="form-label">Camera</label>
+                    <select id="cameraSelect" class="form-select">
+                        <option value="" disabled selected>Loading cameras...</option>
+                    </select>
+                </div>
+                <div class="col-md-3" id="rtspGroup" style="display: none;">
+                    <label class="form-label">RTSP URL</label>
+                    <input type="text" id="rtspUrl" class="form-control" placeholder="rtsp://192.168.1.113:1935/stream">
+                    <div id="rtspError" class="error-message">Invalid RTSP URL format</div>
+                </div>
+                <div class="col-md-3">
+                    <button id="applyBtn" class="btn btn-primary w-100">Apply</button>
+                </div>
+            </div>
         </div>
-        <div class="mb-3" id="imageSelectDiv">
-            <label for="imageSelect" class="form-label">Select Image:</label>
-            <select class="form-select" id="imageSelect"></select>
+
+        <div class="video-container">
+            <div class="video-panel">
+                <h5>Original</h5>
+                <div id="originalConnectionStatus" class="connection-status" style="display: none;"></div>
+                <div id="originalLoader" class="loader">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Loading original...</p>
+                </div>
+                <img id="originalFeed" class="video-frame" src="{{ url_for('video_feed') }}">
+                <div id="originalError" class="error-message">Failed to load original feed</div>
+            </div>
+            <div class="video-panel">
+                <h5>Detection Results</h5>
+                <div id="detectionConnectionStatus" class="connection-status" style="display: none;"></div>
+                <div id="detectionLoader" class="loader">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Processing detection...</p>
+                </div>
+                <img id="detectionFeed" class="video-frame" src="{{ url_for('inference_feed') }}">
+                <div id="detectionError" class="error-message">Failed to load detection feed</div>
+                <div class="stats">
+                    <div>Inference: <span id="inferenceSpeed" class="stats-value">0</span> ms</div>
+                    <div>Objects: <span id="objectCount" class="stats-value">0</span></div>
+                </div>
+            </div>
         </div>
-        <div class="mb-3" id="videoSelectDiv" style="display: none;">
-            <label for="videoSelect" class="form-label">Select Video:</label>
-            <select class="form-select" id="videoSelect"></select>
-        </div>
-        <div class="mb-3" id="rtspUrlDiv" style="display: none;">
-            <label for="rtspUrl" class="form-label">RTSP Stream URL:</label>
-            <input type="text" class="form-control" id="rtspUrl" placeholder="rtsp://example.com/stream">
-        </div>
-        <button id="applySettings" class="btn btn-primary">Apply</button>
     </div>
 
-    <div class="row">
-      <div class="col-6 text-center">
-        <h2>Original Frames</h2>
-        <img src="{{ url_for('video_feed') }}" class="d-block mx-lg-auto img-fluid" alt="High-res Video" width="800" loading="lazy">
-      </div>
-      <div class="col-6 text-center">
-        <h2>Inference Results</h2>
-        <img src="{{ url_for('inference_feed') }}" class="img-fluid border rounded-3 mb-4" width="400" alt="Processed Inference Feed" loading="lazy">
-        <div class="col-lg-6 mx-auto">
-          <p class="">Inference speed: <span id="inference_speed"></span> ms</p>
-          <p class="">Objects detected: <span id="object_counter"></span></p>
-        </div>
-      </div>
-    </div>
-  </div>
+    <script>
+        // Function to load assets with timeout and error handling
+        function loadAssets(type, selectId) {
+            const selectElement = document.getElementById(selectId);
 
-  <script>
-    // Toggle visibility of settings based on selected source
-    document.getElementById('sourceSelect').addEventListener('change', function() {
-        const source = this.value;
-        document.getElementById('imageSelectDiv').style.display = source === 'image' ? 'block' : 'none';
-        document.getElementById('videoSelectDiv').style.display = source === 'video' ? 'block' : 'none';
-        document.getElementById('rtspUrlDiv').style.display = source === 'rtsp' ? 'block' : 'none';
-    });
+            // Show loading state
+            selectElement.innerHTML = '';
+            const loadingOption = document.createElement('option');
+            loadingOption.value = "";
+            loadingOption.textContent = `Loading ${type}...`;
+            loadingOption.disabled = true;
+            loadingOption.selected = true;
+            selectElement.appendChild(loadingOption);
 
-    // Load available images and videos
-    document.addEventListener('DOMContentLoaded', function() {
-        // Load available images
-        fetch('/get_assets?type=image')
-            .then(response => response.json())
-            .then(assets => {
-                const imageSelect = document.getElementById('imageSelect');
-                assets.forEach(asset => {
-                    const option = document.createElement('option');
-                    option.value = asset;
-                    option.textContent = asset;
-                    imageSelect.appendChild(option);
-                });
+            // Create a timeout promise
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => {
+                    reject(new Error(`Timeout loading ${type}`));
+                }, 3000); // 3 second timeout
             });
 
-        // Load available videos
-        fetch('/get_assets?type=video')
-            .then(response => response.json())
-            .then(assets => {
-                const videoSelect = document.getElementById('videoSelect');
-                assets.forEach(asset => {
-                    const option = document.createElement('option');
-                    option.value = asset;
-                    option.textContent = asset;
-                    videoSelect.appendChild(option);
+            // Create the fetch promise
+            const fetchPromise = fetch(`/get_assets?type=${type}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Network response was not ok for ${type}`);
+                    }
+                    return response.json();
                 });
-            });
-    });
 
-    // Apply settings
-    document.getElementById('applySettings').addEventListener('click', function() {
-        const source = document.getElementById('sourceSelect').value;
-        let asset = null;
-        let rtspUrl = null;
+            // Race between fetch and timeout
+            Promise.race([fetchPromise, timeoutPromise])
+                .then(assets => {
+                    selectElement.innerHTML = '';
 
-        if (source === 'image') {
-            asset = document.getElementById('imageSelect').value;
-        } else if (source === 'video') {
-            asset = document.getElementById('videoSelect').value;
-        } else if (source === 'rtsp') {
-            rtspUrl = document.getElementById('rtspUrl').value;
+                    // Add default option
+                    const defaultOption = document.createElement('option');
+                    defaultOption.value = '';
+                    defaultOption.textContent = `Select a ${type}...`;
+                    defaultOption.disabled = true;
+                    defaultOption.selected = true;
+                    selectElement.appendChild(defaultOption);
+
+                    if (assets && assets.length > 0) {
+                        // Sort assets alphabetically
+                        assets.sort().forEach(asset => {
+                            const option = document.createElement('option');
+                            option.value = asset;
+                            option.textContent = asset;
+                            selectElement.appendChild(option);
+                        });
+                    } else {
+                        const option = document.createElement('option');
+                        option.value = '';
+                        option.textContent = `No ${type} found`;
+                        option.disabled = true;
+                        selectElement.appendChild(option);
+                    }
+                })
+                .catch(error => {
+                    console.error(`Error loading ${type}:`, error);
+                    selectElement.innerHTML = '';
+                    const option = document.createElement('option');
+                    option.value = '';
+                    option.textContent = `Error loading ${type}`;
+                    option.disabled = true;
+                    selectElement.appendChild(option);
+                });
         }
 
-        fetch('/set_source', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                source: source,
-                asset: asset,
-                rtspUrl: rtspUrl
-            })
+        // Function to update connection status UI
+        function updateConnectionStatus() {
+            fetch('/get_connection_status')
+                .then(response => response.json())
+                .then(data => {
+                    const originalStatus = document.getElementById('originalConnectionStatus');
+                    const detectionStatus = document.getElementById('detectionConnectionStatus');
+
+                    // Only show status for RTSP streams
+                    if (data.source === 'rtsp') {
+                        originalStatus.style.display = 'block';
+                        detectionStatus.style.display = 'block';
+
+                        // Update status classes and text
+                        if (data.status === 'connected') {
+                            originalStatus.textContent = 'Connected';
+                            originalStatus.className = 'connection-status status-connected';
+                            detectionStatus.textContent = 'Connected';
+                            detectionStatus.className = 'connection-status status-connected';
+                        } else if (data.status === 'reconnecting') {
+                            originalStatus.textContent = 'Reconnecting...';
+                            originalStatus.className = 'connection-status status-reconnecting';
+                            detectionStatus.textContent = 'Reconnecting...';
+                            detectionStatus.className = 'connection-status status-reconnecting';
+                        } else {
+                            originalStatus.textContent = 'Disconnected';
+                            originalStatus.className = 'connection-status status-disconnected';
+                            detectionStatus.textContent = 'Disconnected';
+                            detectionStatus.className = 'connection-status status-disconnected';
+                        }
+                    } else {
+                        originalStatus.style.display = 'none';
+                        detectionStatus.style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error getting connection status:', error);
+                });
+        }
+
+        // Load available assets when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            // Load images with timeout
+            loadAssets('image', 'imageSelect');
+
+            // Load videos with timeout
+            loadAssets('video', 'videoSelect');
+
+            // Load available cameras
+            fetch('/get_cameras')
+                .then(response => response.json())
+                .then(cameras => {
+                    const cameraSelect = document.getElementById('cameraSelect');
+                    cameraSelect.innerHTML = '';
+
+                    // Add default option
+                    const defaultOption = document.createElement('option');
+                    defaultOption.value = '';
+                    defaultOption.textContent = 'Select a camera...';
+                    defaultOption.disabled = true;
+                    defaultOption.selected = true;
+                    cameraSelect.appendChild(defaultOption);
+
+                    if (cameras && cameras.length > 0) {
+                        cameras.forEach(camera => {
+                            const option = document.createElement('option');
+                            option.value = camera;
+                            option.textContent = `Camera ${camera}`;
+                            cameraSelect.appendChild(option);
+                        });
+                    } else {
+                        const option = document.createElement('option');
+                        option.value = '0';
+                        option.textContent = 'No cameras found';
+                        cameraSelect.appendChild(option);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading cameras:', error);
+                    const cameraSelect = document.getElementById('cameraSelect');
+                    cameraSelect.innerHTML = '';
+                    const option = document.createElement('option');
+                    option.value = '0';
+                    option.textContent = 'Error loading cameras';
+                    cameraSelect.appendChild(option);
+                });
+
+            // Start connection status updates
+            updateConnectionStatus();
+            setInterval(updateConnectionStatus, 1000); // Update every second
         });
-    });
 
-    // EventSource for inference speed and object counter
-    const sourceInference = new EventSource("/inference_speed");
-    sourceInference.onmessage = (event) => {
-      document.getElementById("inference_speed").textContent = event.data;
-    };
+        // Simple source switching
+        document.getElementById('sourceSelect').addEventListener('change', function() {
+            const source = this.value;
+            document.getElementById('imageSelectGroup').style.display = source === 'image' ? 'block' : 'none';
+            document.getElementById('videoSelectGroup').style.display = source === 'video' ? 'block' : 'none';
+            document.getElementById('cameraSelectGroup').style.display = source === 'camera' ? 'block' : 'none';
+            document.getElementById('rtspGroup').style.display = source === 'rtsp' ? 'block' : 'none';
+        });
 
-    const sourceObjects = new EventSource("/object_counter");
-    sourceObjects.onmessage = (event) => {
-      document.getElementById("object_counter").textContent = event.data;
-    };
-  </script>
+        // Validate RTSP URL format
+        document.getElementById('rtspUrl').addEventListener('input', function() {
+            const url = this.value;
+            const errorElement = document.getElementById('rtspError');
+            if (url && !url.startsWith('rtsp://')) {
+                errorElement.style.display = 'block';
+            } else {
+                errorElement.style.display = 'none';
+            }
+        });
+
+        // Apply settings with validation
+        document.getElementById('applyBtn').addEventListener('click', function() {
+            // Validate RTSP URL
+            const source = document.getElementById('sourceSelect').value;
+            if (source === 'rtsp') {
+                const rtspUrl = document.getElementById('rtspUrl').value;
+                if (!rtspUrl) {
+                    alert('Please enter an RTSP URL');
+                    return;
+                }
+                if (!rtspUrl.startsWith('rtsp://')) {
+                    document.getElementById('rtspError').style.display = 'block';
+                    return;
+                }
+            }
+
+            // Show loaders and hide errors
+            document.getElementById('originalLoader').style.display = 'block';
+            document.getElementById('detectionLoader').style.display = 'block';
+            document.getElementById('originalFeed').style.display = 'none';
+            document.getElementById('detectionFeed').style.display = 'none';
+            document.getElementById('originalError').style.display = 'none';
+            document.getElementById('detectionError').style.display = 'none';
+
+            let asset = '';
+            let rtspUrl = '';
+            let cameraIndex = 0;
+
+            if (source === 'image') {
+                const select = document.getElementById('imageSelect');
+                if (!select.value) {
+                    alert('Please select an image');
+                    return;
+                }
+                asset = select.value;
+            } else if (source === 'video') {
+                const select = document.getElementById('videoSelect');
+                if (!select.value) {
+                    alert('Please select a video');
+                    return;
+                }
+                asset = select.value;
+            } else if (source === 'rtsp') {
+                rtspUrl = document.getElementById('rtspUrl').value;
+            } else if (source === 'camera') {
+                const select = document.getElementById('cameraSelect');
+                if (!select.value && select.value !== 0) {
+                    alert('Please select a camera');
+                    return;
+                }
+                cameraIndex = parseInt(select.value);
+            }
+
+            fetch('/set_source', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    source: source,
+                    asset: asset,
+                    rtspUrl: rtspUrl,
+                    cameraIndex: cameraIndex
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    setTimeout(function() {
+                        const originalFeed = document.getElementById('originalFeed');
+                        const detectionFeed = document.getElementById('detectionFeed');
+
+                        // Add error handlers
+                        originalFeed.onerror = function() {
+                            document.getElementById('originalLoader').style.display = 'none';
+                            document.getElementById('originalError').style.display = 'block';
+                        };
+
+                        detectionFeed.onerror = function() {
+                            document.getElementById('detectionLoader').style.display = 'none';
+                            document.getElementById('detectionError').style.display = 'block';
+                        };
+
+                        // Update sources with cache-busting
+                        originalFeed.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
+                        detectionFeed.src = "{{ url_for('inference_feed') }}?" + new Date().getTime();
+
+                        // Show frames after a short delay
+                        setTimeout(function() {
+                            document.getElementById('originalLoader').style.display = 'none';
+                            document.getElementById('detectionLoader').style.display = 'none';
+                            document.getElementById('originalFeed').style.display = 'block';
+                            document.getElementById('detectionFeed').style.display = 'block';
+                        }, 500);
+                    }, 500);
+                }
+            })
+            .catch(error => {
+                console.error('Error setting source:', error);
+                document.getElementById('originalLoader').style.display = 'none';
+                document.getElementById('detectionLoader').style.display = 'none';
+                document.getElementById('originalError').style.display = 'block';
+                document.getElementById('detectionError').style.display = 'block';
+            });
+        });
+
+        // Update stats
+        const speedSource = new EventSource("/inference_speed");
+        speedSource.onmessage = (e) => document.getElementById('inferenceSpeed').textContent = e.data;
+        speedSource.onerror = () => {
+            console.error("EventSource failed for inference speed");
+            speedSource.close();
+        };
+
+        const countSource = new EventSource("/object_counter");
+        countSource.onmessage = (e) => document.getElementById('objectCount').textContent = e.data;
+        countSource.onerror = () => {
+            console.error("EventSource failed for object counter");
+            countSource.close();
+        };
+    </script>
 </body>
 </html>
