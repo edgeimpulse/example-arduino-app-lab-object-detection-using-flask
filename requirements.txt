@@ -1,5 +1,0 @@
-edge_impulse_linux
-opencv-python-headless
-flask
-pyaudio
-six

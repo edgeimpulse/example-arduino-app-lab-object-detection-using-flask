@@ -34,7 +34,7 @@ source .venv/bin/activate
 Install the dependencies:
 ```
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r python/requirements.txt
 ```
 
 Run the app:
