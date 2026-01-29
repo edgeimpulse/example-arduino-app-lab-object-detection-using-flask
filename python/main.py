@@ -3,16 +3,16 @@ import os
 import platform
 import time
 import logging
-from flask import Flask, render_template, Response
+import socket
+from flask import Flask, render_template, Response, request, jsonify
+
+from utils.mock_dependencies import apply_mocks
+apply_mocks()  # Apply mocks for six and pyaudio
 from edge_impulse_linux.image import ImageImpulseRunner
-#from arduino.app_utils import App
 
 app = Flask(__name__, static_folder='templates/assets')
 
 # --- Configuration ---
-VIDEO_PATH = "/assets/rubber-duckies.mp4"  # Path to your video file
-MODEL_PATH = "models/rubber-ducky-mac-arm64.eim"
-STREAM_URL = "rtsp://192.168.1.113:1935"
 SCALE_FACTOR = 6  # Scale factor for resizing inference frames
 DESIRED_FPS = 30  # Target FPS for video processing
 
@@ -22,10 +22,18 @@ inferenceSpeed = 0
 bounding_boxes = []
 latest_high_res_frame = None
 runner = None  # Global runner object
+model_info = None  # Global model info
+
+# Global variable to store the current source settings
+current_source = {
+    'source': 'image',
+    'asset': 'rubber-duckies.jpg',
+    'rtsp_url': ''
+}
 
 # Initialize the Edge Impulse runner when the app starts
 def init_runner():
-    global runner, MODEL_PATH
+    global runner, MODEL_PATH, model_info
 
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -61,23 +69,71 @@ def init_runner():
     print(f"Selected model: {model_name}")
 
     runner = ImageImpulseRunner(MODEL_PATH)
-    runner.init()
+    model_info = runner.init()
+    print(f"Model info: {model_info}")
     print("Edge Impulse runner initialized.")
+
+def get_local_ip():
+    """Get the local IP address of the machine."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+    except Exception:
+        local_ip = "127.0.0.1"
+    finally:
+        s.close()
+    return local_ip
 
 # --- Video feed generator ---
 def gen_video_frames():
-    global latest_high_res_frame
-    img = cv2.imread("assets/rubber-duckies.jpg")  # Load the JPG image
-    if img is None:
-        raise FileNotFoundError("Image not found at: assets/rubber-duckies.jpg")
+    global latest_high_res_frame, current_source
 
     while True:
-        latest_high_res_frame = img.copy()  # Use the image as the frame
-        ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
-        frame = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(1)  # Add a small delay to simulate a video feed
+        if current_source['source'] == 'image':
+            img_path = os.path.join(os.path.dirname(__file__), '..', 'assets', current_source['asset'])
+            img = cv2.imread(img_path)
+            if img is None:
+                raise FileNotFoundError(f"Image not found at: {img_path}")
+            latest_high_res_frame = img.copy()
+            ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            time.sleep(1)  # Add a small delay for images
+
+        elif current_source['source'] == 'video':
+            video_path = os.path.join(os.path.dirname(__file__), '..', 'assets', current_source['asset'])
+            cap = cv2.VideoCapture(video_path)
+            while cap.isOpened():
+                success, frame = cap.read()
+                if not success:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                latest_high_res_frame = frame.copy()
+                ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
+                frame = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                time.sleep(0.03)  # Adjust delay for video frame rate
+            cap.release()
+
+        elif current_source['source'] == 'rtsp':
+            cap = cv2.VideoCapture(current_source['rtsp_url'])
+            while cap.isOpened():
+                success, frame = cap.read()
+                if not success:
+                    cap.release()
+                    time.sleep(1)
+                    cap = cv2.VideoCapture(current_source['rtsp_url'])
+                    continue
+                latest_high_res_frame = frame.copy()
+                ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
+                frame = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                time.sleep(0.03)  # Adjust delay for video frame rate
+            cap.release()
 
 # --- Inference and bounding box drawing ---
 def gen_inference_frames():
@@ -85,7 +141,6 @@ def gen_inference_frames():
 
     while True:
         if latest_high_res_frame is None:
-            print("Waiting for video frame...")
             time.sleep(0.1)
             continue
 
@@ -104,11 +159,12 @@ def gen_inference_frames():
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 def process_inference_result(res, cropped):
-    global countObjects, bounding_boxes, inferenceSpeed
+    global countObjects, bounding_boxes, inferenceSpeed, model_info
 
     countObjects = 0
     bounding_boxes.clear()
     inferenceSpeed = res['timing']['classification']
+    model_type = model_info['model_parameters']['model_type']
 
     if "bounding_boxes" in res["result"]:
         for bb in res["result"]["bounding_boxes"]:
@@ -122,17 +178,69 @@ def process_inference_result(res, cropped):
                     'height': int(bb['height']),
                     'confidence': bb['value']
                 })
-                cropped = draw_centroids(cropped, bb)
+                # Draw bounding boxes for object detection models
+                if model_type == 'object_detection':
+                    cropped = draw_bounding_box(cropped, bb)
+                # Draw centroids for constrained object detection (FOMO) models
+                elif model_type == 'constrained_object_detection':
+                    cropped = draw_centroids(cropped, bb)
+    return cropped
+
+def draw_bounding_box(cropped, bb):
+    """Draw bounding box for object detection models."""
+    x = int(bb['x'] * SCALE_FACTOR)
+    y = int(bb['y'] * SCALE_FACTOR)
+    width = int(bb['width'] * SCALE_FACTOR)
+    height = int(bb['height'] * SCALE_FACTOR)
+
+    # Draw rectangle
+    cropped = cv2.rectangle(cropped, (x, y), (x + width, y + height), (0, 255, 0), 2)
+
+    # Add label
+    label_text = f"{bb['label']}: {bb['value']:.2f}"
+    label_position = (x, y - 10)
+    cv2.putText(cropped, label_text, label_position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
     return cropped
 
 def draw_centroids(cropped, bb):
+    """Draw centroids for constrained object detection (FOMO) models."""
     center_x = int((bb['x'] + bb['width'] / 2) * SCALE_FACTOR)
     center_y = int((bb['y'] + bb['height'] / 2) * SCALE_FACTOR)
     cropped = cv2.circle(cropped, (center_x, center_y), 10, (0, 255, 0), 2)
+
+    # Add label
     label_text = f"{bb['label']}: {bb['value']:.2f}"
     label_position = (int(bb['x'] * SCALE_FACTOR), int(bb['y'] * SCALE_FACTOR) - 10)
     cv2.putText(cropped, label_text, label_position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
     return cropped
+
+# Add a new route to get available assets
+@app.route('/get_assets', methods=['GET'])
+def get_assets():
+    asset_type = request.args.get('type', 'image')
+    assets_dir = os.path.join(os.path.dirname(__file__), '..', 'assets')
+    assets = []
+
+    if os.path.exists(assets_dir):
+        for file in os.listdir(assets_dir):
+            if asset_type == 'image' and file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                assets.append(file)
+            elif asset_type == 'video' and file.lower().endswith(('.mp4', '.avi', '.mov')):
+                assets.append(file)
+
+    return jsonify(assets)
+
+# Add a new route to handle setting changes
+@app.route('/set_source', methods=['POST'])
+def set_source():
+    global current_source
+    data = request.get_json()
+    current_source['source'] = data.get('source', 'image')
+    current_source['asset'] = data.get('asset', 'rubber-duckies.jpg')
+    current_source['rtsp_url'] = data.get('rtspUrl', '')
+    return jsonify({'status': 'success'})
 
 # --- Flask routes ---
 @app.route('/')
@@ -167,4 +275,6 @@ def object_counter():
 if __name__ == '__main__':
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
     init_runner()  # Initialize the runner when the app starts
+    local_ip = get_local_ip()
+    print(f"Server running at: http://{local_ip}:5001")
     app.run(host="0.0.0.0", port=5001, debug=True)
