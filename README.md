@@ -14,8 +14,8 @@ This project demonstrates real-time object detection using Edge Impulse models a
 
 1. Open the **Arduino App Lab** and **Connect** your Arduino UNO Q.
 2. SSH connexion: Click on the "terminal" icon on the bottom-left corner:
-   
-   ![App Lab - Open Terminal](/docs/app-lab-open-terminal.png)
+
+![App Lab - Open Terminal](/docs/app-lab-open-terminal.png)
 
 3. Go to the `ArduinoApp/` directory:
 
@@ -32,7 +32,7 @@ cd home/arduino/ArduinoApps/
 
 5. In **Arduino App Lab**, go to **My Apps** (top-left corner). You should see the new application:
 
-    ![App Lab - My Apps](/docs/arduino-app-lab-new-app.png)
+![App Lab - My Apps](/docs/arduino-app-lab-new-app.png)
 
 6. **Make the models executable** (or add your own):
 
@@ -74,7 +74,9 @@ hostname -I
 192.168.1.8 172.17.0.1 172.18.0.1 2a01:e0a:c6:14b0:c428:1d78:47e0:1f8e 
 ```
 
-1.  Open a web browser using your local IP address, here in this case `192.168.1.8:5001`:
+10.  Open a web browser using your local IP address, here in this case `192.168.1.8:5001`
+
+![Test the application](/docs/test-the-app.png)
 
 ## Local Development
 
