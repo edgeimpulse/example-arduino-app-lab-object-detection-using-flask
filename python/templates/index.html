@@ -128,7 +128,7 @@
     <div class="demo-container">
         <div class="header">
             <img src="assets/EI_logo_stacked.png" alt="Edge Impulse">
-            <h2>Rubber Ducky Detection Demo</h2>
+            <h2>Object Detection Demo</h2>
             <p class="text-muted">Using Edge Impulse and Arduino App Lab</p>
         </div>
 
@@ -205,305 +205,231 @@
     </div>
 
     <script>
-        // Function to load assets with timeout and error handling
-        function loadAssets(type, selectId) {
-            const selectElement = document.getElementById(selectId);
+        // --- DOM Elements ---
+        const dom = {
+            sourceSelect: document.getElementById('sourceSelect'),
+            imageSelect: document.getElementById('imageSelect'),
+            videoSelect: document.getElementById('videoSelect'),
+            cameraSelect: document.getElementById('cameraSelect'),
+            rtspUrl: document.getElementById('rtspUrl'),
+            rtspError: document.getElementById('rtspError'),
+            applyBtn: document.getElementById('applyBtn'),
+            originalLoader: document.getElementById('originalLoader'),
+            detectionLoader: document.getElementById('detectionLoader'),
+            originalFeed: document.getElementById('originalFeed'),
+            detectionFeed: document.getElementById('detectionFeed'),
+            originalError: document.getElementById('originalError'),
+            detectionError: document.getElementById('detectionError'),
+            originalConnectionStatus: document.getElementById('originalConnectionStatus'),
+            detectionConnectionStatus: document.getElementById('detectionConnectionStatus'),
+            imageSelectGroup: document.getElementById('imageSelectGroup'),
+            videoSelectGroup: document.getElementById('videoSelectGroup'),
+            cameraSelectGroup: document.getElementById('cameraSelectGroup'),
+            rtspGroup: document.getElementById('rtspGroup'),
+            inferenceSpeed: document.getElementById('inferenceSpeed'),
+            objectCount: document.getElementById('objectCount'),
+        };
 
-            // Show loading state
-            selectElement.innerHTML = '';
-            const loadingOption = document.createElement('option');
-            loadingOption.value = "";
-            loadingOption.textContent = `Loading ${type}...`;
-            loadingOption.disabled = true;
-            loadingOption.selected = true;
-            selectElement.appendChild(loadingOption);
+        // --- Utility Functions ---
+        function setSelectOptions(select, options, defaultText) {
+            select.innerHTML = '';
+            const defaultOption = document.createElement('option');
+            defaultOption.value = '';
+            defaultOption.textContent = defaultText;
+            defaultOption.disabled = true;
+            defaultOption.selected = true;
+            select.appendChild(defaultOption);
+            options.forEach(opt => select.appendChild(opt));
+        }
 
-            // Create a timeout promise
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => {
-                    reject(new Error(`Timeout loading ${type}`));
-                }, 3000); // 3 second timeout
-            });
+        function showLoader(loader, show = true) {
+            loader.style.display = show ? 'block' : 'none';
+        }
+        function showError(error, show = true) {
+            error.style.display = show ? 'block' : 'none';
+        }
+        function showFeed(feed, show = true) {
+            feed.style.display = show ? 'block' : 'none';
+        }
 
-            // Create the fetch promise
+        // --- Asset Loading ---
+        function loadAssets(type, select) {
+            setSelectOptions(select, [], `Loading ${type}...`);
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000));
             const fetchPromise = fetch(`/get_assets?type=${type}`)
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`Network response was not ok for ${type}`);
-                    }
-                    return response.json();
-                });
-
-            // Race between fetch and timeout
+                .then(r => r.ok ? r.json() : Promise.reject('Network error'));
             Promise.race([fetchPromise, timeoutPromise])
                 .then(assets => {
-                    selectElement.innerHTML = '';
-
-                    // Add default option
-                    const defaultOption = document.createElement('option');
-                    defaultOption.value = '';
-                    defaultOption.textContent = `Select a ${type}...`;
-                    defaultOption.disabled = true;
-                    defaultOption.selected = true;
-                    selectElement.appendChild(defaultOption);
-
                     if (assets && assets.length > 0) {
-                        // Sort assets alphabetically
-                        assets.sort().forEach(asset => {
-                            const option = document.createElement('option');
-                            option.value = asset;
-                            option.textContent = asset;
-                            selectElement.appendChild(option);
+                        const opts = assets.sort().map(asset => {
+                            const o = document.createElement('option');
+                            o.value = asset;
+                            o.textContent = asset;
+                            return o;
                         });
+                        setSelectOptions(select, opts, `Select a ${type}...`);
                     } else {
-                        const option = document.createElement('option');
-                        option.value = '';
-                        option.textContent = `No ${type} found`;
-                        option.disabled = true;
-                        selectElement.appendChild(option);
+                        setSelectOptions(select, [Object.assign(document.createElement('option'), {
+                            value: '', textContent: `No ${type} found`, disabled: true
+                        })], `Select a ${type}...`);
                     }
                 })
-                .catch(error => {
-                    console.error(`Error loading ${type}:`, error);
-                    selectElement.innerHTML = '';
-                    const option = document.createElement('option');
-                    option.value = '';
-                    option.textContent = `Error loading ${type}`;
-                    option.disabled = true;
-                    selectElement.appendChild(option);
+                .catch(() => {
+                    setSelectOptions(select, [Object.assign(document.createElement('option'), {
+                        value: '', textContent: `Error loading ${type}`, disabled: true
+                    })], `Select a ${type}...`);
                 });
         }
 
-        // Function to update connection status UI
+        function loadCameras() {
+            fetch('/get_cameras')
+                .then(r => r.json())
+                .then(cameras => {
+                    if (cameras && cameras.length > 0) {
+                        const opts = cameras.map(cam => {
+                            const o = document.createElement('option');
+                            o.value = cam;
+                            o.textContent = `Camera ${cam}`;
+                            return o;
+                        });
+                        setSelectOptions(dom.cameraSelect, opts, 'Select a camera...');
+                    } else {
+                        setSelectOptions(dom.cameraSelect, [Object.assign(document.createElement('option'), {
+                            value: '0', textContent: 'No cameras found', disabled: true
+                        })], 'Select a camera...');
+                    }
+                })
+                .catch(() => {
+                    setSelectOptions(dom.cameraSelect, [Object.assign(document.createElement('option'), {
+                        value: '0', textContent: 'Error loading cameras', disabled: true
+                    })], 'Select a camera...');
+                });
+        }
+
+        // --- Connection Status ---
         function updateConnectionStatus() {
             fetch('/get_connection_status')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
-                    const originalStatus = document.getElementById('originalConnectionStatus');
-                    const detectionStatus = document.getElementById('detectionConnectionStatus');
-
-                    // Only show status for RTSP streams
-                    if (data.source === 'rtsp') {
-                        originalStatus.style.display = 'block';
-                        detectionStatus.style.display = 'block';
-
-                        // Update status classes and text
-                        if (data.status === 'connected') {
-                            originalStatus.textContent = 'Connected';
-                            originalStatus.className = 'connection-status status-connected';
-                            detectionStatus.textContent = 'Connected';
-                            detectionStatus.className = 'connection-status status-connected';
-                        } else if (data.status === 'reconnecting') {
-                            originalStatus.textContent = 'Reconnecting...';
-                            originalStatus.className = 'connection-status status-reconnecting';
-                            detectionStatus.textContent = 'Reconnecting...';
-                            detectionStatus.className = 'connection-status status-reconnecting';
+                    const { source, status } = data;
+                    if (source === 'rtsp') {
+                        dom.originalConnectionStatus.style.display = 'block';
+                        dom.detectionConnectionStatus.style.display = 'block';
+                        let text, cls;
+                        if (status === 'connected') {
+                            text = 'Connected'; cls = 'connection-status status-connected';
+                        } else if (status === 'reconnecting') {
+                            text = 'Reconnecting...'; cls = 'connection-status status-reconnecting';
                         } else {
-                            originalStatus.textContent = 'Disconnected';
-                            originalStatus.className = 'connection-status status-disconnected';
-                            detectionStatus.textContent = 'Disconnected';
-                            detectionStatus.className = 'connection-status status-disconnected';
+                            text = 'Disconnected'; cls = 'connection-status status-disconnected';
                         }
+                        dom.originalConnectionStatus.textContent = text;
+                        dom.originalConnectionStatus.className = cls;
+                        dom.detectionConnectionStatus.textContent = text;
+                        dom.detectionConnectionStatus.className = cls;
                     } else {
-                        originalStatus.style.display = 'none';
-                        detectionStatus.style.display = 'none';
+                        dom.originalConnectionStatus.style.display = 'none';
+                        dom.detectionConnectionStatus.style.display = 'none';
                     }
-                })
-                .catch(error => {
-                    console.error('Error getting connection status:', error);
                 });
         }
 
-        // Load available assets when page loads
-        document.addEventListener('DOMContentLoaded', function() {
-            // Load images with timeout
-            loadAssets('image', 'imageSelect');
+        // --- Event Handlers ---
+        function handleSourceChange() {
+            const source = dom.sourceSelect.value;
+            dom.imageSelectGroup.style.display = source === 'image' ? 'block' : 'none';
+            dom.videoSelectGroup.style.display = source === 'video' ? 'block' : 'none';
+            dom.cameraSelectGroup.style.display = source === 'camera' ? 'block' : 'none';
+            dom.rtspGroup.style.display = source === 'rtsp' ? 'block' : 'none';
+        }
 
-            // Load videos with timeout
-            loadAssets('video', 'videoSelect');
+        function handleRtspInput() {
+            const url = dom.rtspUrl.value;
+            showError(dom.rtspError, url && !url.startsWith('rtsp://'));
+        }
 
-            // Load available cameras
-            fetch('/get_cameras')
-                .then(response => response.json())
-                .then(cameras => {
-                    const cameraSelect = document.getElementById('cameraSelect');
-                    cameraSelect.innerHTML = '';
-
-                    // Add default option
-                    const defaultOption = document.createElement('option');
-                    defaultOption.value = '';
-                    defaultOption.textContent = 'Select a camera...';
-                    defaultOption.disabled = true;
-                    defaultOption.selected = true;
-                    cameraSelect.appendChild(defaultOption);
-
-                    if (cameras && cameras.length > 0) {
-                        cameras.forEach(camera => {
-                            const option = document.createElement('option');
-                            option.value = camera;
-                            option.textContent = `Camera ${camera}`;
-                            cameraSelect.appendChild(option);
-                        });
-                    } else {
-                        const option = document.createElement('option');
-                        option.value = '0';
-                        option.textContent = 'No cameras found';
-                        cameraSelect.appendChild(option);
-                    }
-                })
-                .catch(error => {
-                    console.error('Error loading cameras:', error);
-                    const cameraSelect = document.getElementById('cameraSelect');
-                    cameraSelect.innerHTML = '';
-                    const option = document.createElement('option');
-                    option.value = '0';
-                    option.textContent = 'Error loading cameras';
-                    cameraSelect.appendChild(option);
-                });
-
-            // Start connection status updates
-            updateConnectionStatus();
-            setInterval(updateConnectionStatus, 1000); // Update every second
-        });
-
-        // Simple source switching
-        document.getElementById('sourceSelect').addEventListener('change', function() {
-            const source = this.value;
-            document.getElementById('imageSelectGroup').style.display = source === 'image' ? 'block' : 'none';
-            document.getElementById('videoSelectGroup').style.display = source === 'video' ? 'block' : 'none';
-            document.getElementById('cameraSelectGroup').style.display = source === 'camera' ? 'block' : 'none';
-            document.getElementById('rtspGroup').style.display = source === 'rtsp' ? 'block' : 'none';
-        });
-
-        // Validate RTSP URL format
-        document.getElementById('rtspUrl').addEventListener('input', function() {
-            const url = this.value;
-            const errorElement = document.getElementById('rtspError');
-            if (url && !url.startsWith('rtsp://')) {
-                errorElement.style.display = 'block';
-            } else {
-                errorElement.style.display = 'none';
-            }
-        });
-
-        // Apply settings with validation
-        document.getElementById('applyBtn').addEventListener('click', function() {
-            // Validate RTSP URL
-            const source = document.getElementById('sourceSelect').value;
+        function handleApply() {
+            const source = dom.sourceSelect.value;
+            let asset = '', rtspUrl = '', cameraIndex = 0;
             if (source === 'rtsp') {
-                const rtspUrl = document.getElementById('rtspUrl').value;
-                if (!rtspUrl) {
-                    alert('Please enter an RTSP URL');
-                    return;
-                }
+                rtspUrl = dom.rtspUrl.value;
+                if (!rtspUrl) return alert('Please enter an RTSP URL');
                 if (!rtspUrl.startsWith('rtsp://')) {
-                    document.getElementById('rtspError').style.display = 'block';
-                    return;
+                    showError(dom.rtspError, true); return;
                 }
             }
-
-            // Show loaders and hide errors
-            document.getElementById('originalLoader').style.display = 'block';
-            document.getElementById('detectionLoader').style.display = 'block';
-            document.getElementById('originalFeed').style.display = 'none';
-            document.getElementById('detectionFeed').style.display = 'none';
-            document.getElementById('originalError').style.display = 'none';
-            document.getElementById('detectionError').style.display = 'none';
-
-            let asset = '';
-            let rtspUrl = '';
-            let cameraIndex = 0;
-
             if (source === 'image') {
-                const select = document.getElementById('imageSelect');
-                if (!select.value) {
-                    alert('Please select an image');
-                    return;
-                }
-                asset = select.value;
+                if (!dom.imageSelect.value) return alert('Please select an image');
+                asset = dom.imageSelect.value;
             } else if (source === 'video') {
-                const select = document.getElementById('videoSelect');
-                if (!select.value) {
-                    alert('Please select a video');
-                    return;
-                }
-                asset = select.value;
-            } else if (source === 'rtsp') {
-                rtspUrl = document.getElementById('rtspUrl').value;
+                if (!dom.videoSelect.value) return alert('Please select a video');
+                asset = dom.videoSelect.value;
             } else if (source === 'camera') {
-                const select = document.getElementById('cameraSelect');
-                if (!select.value && select.value !== 0) {
-                    alert('Please select a camera');
-                    return;
-                }
-                cameraIndex = parseInt(select.value);
+                if (!dom.cameraSelect.value && dom.cameraSelect.value !== 0) return alert('Please select a camera');
+                cameraIndex = parseInt(dom.cameraSelect.value);
             }
-
+            // Show loaders, hide errors/feeds
+            showLoader(dom.originalLoader, true);
+            showLoader(dom.detectionLoader, true);
+            showFeed(dom.originalFeed, false);
+            showFeed(dom.detectionFeed, false);
+            showError(dom.originalError, false);
+            showError(dom.detectionError, false);
             fetch('/set_source', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    source: source,
-                    asset: asset,
-                    rtspUrl: rtspUrl,
-                    cameraIndex: cameraIndex
-                })
+                body: JSON.stringify({ source, asset, rtspUrl, cameraIndex })
             })
-            .then(response => response.json())
+            .then(r => r.json())
             .then(data => {
                 if (data.status === 'success') {
-                    setTimeout(function() {
-                        const originalFeed = document.getElementById('originalFeed');
-                        const detectionFeed = document.getElementById('detectionFeed');
-
-                        // Add error handlers
-                        originalFeed.onerror = function() {
-                            document.getElementById('originalLoader').style.display = 'none';
-                            document.getElementById('originalError').style.display = 'block';
+                    setTimeout(() => {
+                        dom.originalFeed.onerror = () => {
+                            showLoader(dom.originalLoader, false);
+                            showError(dom.originalError, true);
                         };
-
-                        detectionFeed.onerror = function() {
-                            document.getElementById('detectionLoader').style.display = 'none';
-                            document.getElementById('detectionError').style.display = 'block';
+                        dom.detectionFeed.onerror = () => {
+                            showLoader(dom.detectionLoader, false);
+                            showError(dom.detectionError, true);
                         };
-
-                        // Update sources with cache-busting
-                        originalFeed.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
-                        detectionFeed.src = "{{ url_for('inference_feed') }}?" + new Date().getTime();
-
-                        // Show frames after a short delay
-                        setTimeout(function() {
-                            document.getElementById('originalLoader').style.display = 'none';
-                            document.getElementById('detectionLoader').style.display = 'none';
-                            document.getElementById('originalFeed').style.display = 'block';
-                            document.getElementById('detectionFeed').style.display = 'block';
+                        dom.originalFeed.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
+                        dom.detectionFeed.src = "{{ url_for('inference_feed') }}?" + new Date().getTime();
+                        setTimeout(() => {
+                            showLoader(dom.originalLoader, false);
+                            showLoader(dom.detectionLoader, false);
+                            showFeed(dom.originalFeed, true);
+                            showFeed(dom.detectionFeed, true);
                         }, 500);
                     }, 500);
                 }
             })
-            .catch(error => {
-                console.error('Error setting source:', error);
-                document.getElementById('originalLoader').style.display = 'none';
-                document.getElementById('detectionLoader').style.display = 'none';
-                document.getElementById('originalError').style.display = 'block';
-                document.getElementById('detectionError').style.display = 'block';
+            .catch(() => {
+                showLoader(dom.originalLoader, false);
+                showLoader(dom.detectionLoader, false);
+                showError(dom.originalError, true);
+                showError(dom.detectionError, true);
             });
+        }
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', function() {
+            loadAssets('image', dom.imageSelect);
+            loadAssets('video', dom.videoSelect);
+            loadCameras();
+            updateConnectionStatus();
+            setInterval(updateConnectionStatus, 1000);
         });
+        dom.sourceSelect.addEventListener('change', handleSourceChange);
+        dom.rtspUrl.addEventListener('input', handleRtspInput);
+        dom.applyBtn.addEventListener('click', handleApply);
 
-        // Update stats
+        // --- Stats EventSources ---
         const speedSource = new EventSource("/inference_speed");
-        speedSource.onmessage = (e) => document.getElementById('inferenceSpeed').textContent = e.data;
-        speedSource.onerror = () => {
-            console.error("EventSource failed for inference speed");
-            speedSource.close();
-        };
-
+        speedSource.onmessage = e => dom.inferenceSpeed.textContent = e.data;
+        speedSource.onerror = () => { speedSource.close(); };
         const countSource = new EventSource("/object_counter");
-        countSource.onmessage = (e) => document.getElementById('objectCount').textContent = e.data;
-        countSource.onerror = () => {
-            console.error("EventSource failed for object counter");
-            countSource.close();
-        };
+        countSource.onmessage = e => dom.objectCount.textContent = e.data;
+        countSource.onerror = () => { countSource.close(); };
     </script>
 </body>
 </html>

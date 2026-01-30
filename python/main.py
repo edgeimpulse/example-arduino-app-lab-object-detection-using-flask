@@ -1,10 +1,43 @@
-import cv2
+
+# --- Imports ---
 import os
-import platform
+import cv2
 import time
-import logging
 import socket
+import logging
+import platform
 from flask import Flask, render_template, Response, request, jsonify
+
+# --- App and Config ---
+from utils.mock_dependencies import apply_mocks
+apply_mocks()  # Apply mocks for six and pyaudio
+from edge_impulse_linux.image import ImageImpulseRunner
+
+app = Flask(__name__, static_folder='templates/assets')
+
+# --- Constants ---
+SCALE_FACTOR = 3  # Scale factor for resizing inference frames
+MAX_CAMERAS = 5
+MAX_RECONNECT_ATTEMPTS = 5
+
+# --- Globals ---
+countObjects = 0
+inferenceSpeed = 0
+bounding_boxes = []
+latest_high_res_frame = None
+runner = None
+model_info = None
+
+# Source management
+current_source = {
+    'source': 'image',
+    'asset': 'rubber-duckies.jpg',
+    'rtsp_url': '',
+    'camera_index': 0,
+    'connection_status': 'connecting'
+}
+source_change_requested = False
+new_source_settings = None
 
 from utils.mock_dependencies import apply_mocks
 apply_mocks()  # Apply mocks for six and pyaudio
@@ -39,12 +72,11 @@ def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
+        return s.getsockname()[0]
     except Exception:
-        local_ip = "127.0.0.1"
+        return "127.0.0.1"
     finally:
         s.close()
-    return local_ip
 
 def init_runner():
     """Initialize the Edge Impulse runner."""
@@ -52,31 +84,21 @@ def init_runner():
     system = platform.system().lower()
     machine = platform.machine().lower()
     print(f"Detected system: {system} {machine}")
-
     models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
     available_models = [f for f in os.listdir(models_dir) if f.endswith('.eim')]
-
     model_mapping = {
         ('darwin', 'arm64'): "rubber-ducky-mac-arm64.eim",
         ('linux', 'aarch64'): "rubber-ducky-linux-aarch64.eim"
     }
-
-    model_name = None
-    for (os_name, arch), model_file in model_mapping.items():
-        if system == os_name and arch in machine:
-            model_name = model_file
-            break
-
+    model_name = next((model_file for (os_name, arch), model_file in model_mapping.items()
+                      if system == os_name and arch in machine), None)
     if not model_name:
         raise RuntimeError(f"Unsupported system: {system} {machine}. Only macOS (arm64) and Linux (aarch64) are supported.")
-
     model_path = os.path.join(models_dir, model_name)
     if not os.path.isfile(model_path):
         raise FileNotFoundError(f"Required model {model_name} not found in {models_dir}. Available models: {available_models}")
-
     MODEL_PATH = model_path
     print(f"Selected model: {model_name}")
-
     runner = ImageImpulseRunner(MODEL_PATH)
     model_info = runner.init()
     print(f"Model info: {model_info}")
@@ -87,8 +109,6 @@ def gen_video_frames():
     global latest_high_res_frame, current_source, source_change_requested, new_source_settings
     cap = None
     reconnect_attempts = 0
-    max_reconnect_attempts = 5
-
     while True:
         if source_change_requested:
             source_change_requested = False
@@ -96,12 +116,12 @@ def gen_video_frames():
             if cap is not None:
                 cap.release()
                 time.sleep(0.5)
-            current_source = new_source_settings
+            current_source.update(new_source_settings)
             current_source['connection_status'] = 'connecting'
             print(f"Switched to source: {current_source}")
-
         try:
-            if current_source['source'] == 'camera':
+            src = current_source['source']
+            if src == 'camera':
                 if cap is None or not cap.isOpened():
                     cap = cv2.VideoCapture(current_source['camera_index'])
                     if not cap.isOpened():
@@ -118,11 +138,9 @@ def gen_video_frames():
                 current_source['connection_status'] = 'connected'
                 ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
                 frame = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                 time.sleep(0.03)
-
-            elif current_source['source'] == 'image':
+            elif src == 'image':
                 img_path = os.path.join(os.path.dirname(__file__), '..', 'assets', current_source['asset'])
                 img = cv2.imread(img_path)
                 if img is None:
@@ -133,11 +151,9 @@ def gen_video_frames():
                 current_source['connection_status'] = 'connected'
                 ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
                 frame = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                 time.sleep(1)
-
-            elif current_source['source'] == 'video':
+            elif src == 'video':
                 if cap is None or not cap.isOpened():
                     video_path = os.path.join(os.path.dirname(__file__), '..', 'assets', current_source['asset'])
                     cap = cv2.VideoCapture(video_path)
@@ -154,55 +170,42 @@ def gen_video_frames():
                 current_source['connection_status'] = 'connected'
                 ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
                 frame = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                 time.sleep(0.03)
-
-            elif current_source['source'] == 'rtsp':
+            elif src == 'rtsp':
                 if cap is None or not cap.isOpened():
-                    # Configure for H.264 streams
                     rtsp_url = current_source['rtsp_url'].rstrip('/')
                     print(f"Attempting to connect to RTSP: {rtsp_url}")
-
-                    # Try with FFmpeg backend and H.264 specific options
                     cap = cv2.VideoCapture()
                     if not cap.open(rtsp_url, cv2.CAP_FFMPEG):
                         print(f"Failed to open RTSP stream: {rtsp_url}")
                         current_source['connection_status'] = 'disconnected'
                         time.sleep(1)
                         continue
-
-                    # Set buffer size and other parameters for better RTSP performance
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     cap.set(cv2.CAP_PROP_FPS, 30)
                     current_source['connection_status'] = 'connected'
-
                 success, frame = cap.read()
                 if not success:
                     reconnect_attempts += 1
-                    print(f"Failed to read frame from RTSP, reconnect attempt {reconnect_attempts}/{max_reconnect_attempts}")
+                    print(f"Failed to read frame from RTSP, reconnect attempt {reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS}")
                     current_source['connection_status'] = 'reconnecting'
-
-                    if reconnect_attempts >= max_reconnect_attempts:
+                    if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
                         print("Max reconnect attempts reached, giving up for now")
                         current_source['connection_status'] = 'disconnected'
                         cap.release()
-                        time.sleep(5)  # Wait longer before trying again
+                        time.sleep(5)
                         reconnect_attempts = 0
                         continue
-
                     cap.release()
                     time.sleep(1)
                     continue
-
-                reconnect_attempts = 0  # Reset counter on successful frame
+                reconnect_attempts = 0
                 latest_high_res_frame = frame.copy()
                 ret, buffer = cv2.imencode('.jpg', latest_high_res_frame)
                 frame = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                 time.sleep(0.03)
-
         except Exception as e:
             print(f"Error in video feed: {str(e)}")
             current_source['connection_status'] = 'disconnected'
@@ -321,7 +324,7 @@ def get_assets():
 def get_cameras():
     """Get available connected cameras"""
     cameras = []
-    for i in range(5):  # Try up to 5 cameras
+    for i in range(MAX_CAMERAS):
         cap = cv2.VideoCapture(i)
         if cap.isOpened():
             cameras.append(i)
