@@ -6,6 +6,9 @@ import time
 import socket
 import logging
 import platform
+import requests
+import io
+import json
 from flask import Flask, render_template, Response, request, jsonify
 
 # --- App and Config ---
@@ -19,12 +22,14 @@ app = Flask(__name__, static_folder='templates/assets')
 SCALE_FACTOR = 3  # Scale factor for resizing inference frames
 MAX_CAMERAS = 5
 MAX_RECONNECT_ATTEMPTS = 5
+EI_INGEST_URL = "https://ingestion.edgeimpulse.com/api/"
 
 # --- Globals ---
 countObjects = 0
 inferenceSpeed = 0
 bounding_boxes = []
 latest_high_res_frame = None
+last_inference_frame_size = None  # (width, height) of the frame coordinates for bounding_boxes
 runner = None
 model_info = None
 
@@ -61,7 +66,8 @@ current_source = {
     'source': 'image',
     'asset': 'rubber-duckies.jpg',
     'rtsp_url': '',
-    'camera_index': 0
+    'camera_index': 0,
+    'connection_status': 'connecting'
 }
 
 source_change_requested = False
@@ -232,7 +238,7 @@ def gen_video_frames():
 
 def gen_inference_frames():
     """Generate inference frames with object detection."""
-    global countObjects, bounding_boxes, inferenceSpeed, latest_high_res_frame, runner
+    global countObjects, bounding_boxes, inferenceSpeed, latest_high_res_frame, runner, last_inference_frame_size
 
     while True:
         if latest_high_res_frame is None:
@@ -245,6 +251,8 @@ def gen_inference_frames():
             # Try to get features with error handling
             try:
                 features, cropped = runner.get_features_from_image(img)
+                # Store the coordinate space of the returned bounding boxes (pre SCALE_FACTOR rendering)
+                last_inference_frame_size = (int(cropped.shape[1]), int(cropped.shape[0]))
                 res = runner.classify(features)
             except Exception as e:
                 print(f"Error during inference: {str(e)}")
@@ -408,6 +416,69 @@ def object_counter():
             yield f"data:{countObjects}\n\n"
             time.sleep(0.1)
     return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/upload_edge_impulse', methods=['POST'])
+def upload_edge_impulse():
+    data = request.get_json() or {}
+    api_key = data.get('apiKey')
+    category = data.get('category', 'training')
+    include_labels = bool(data.get('includeLabels', False))
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Missing API key'}), 400
+
+    if category not in ['training', 'testing', 'split']:
+        return jsonify({'status': 'error', 'message': 'Invalid category'}), 400
+
+    if latest_high_res_frame is None:
+        return jsonify({'status': 'error', 'message': 'No frame available yet. Wait for the Original feed to load.'}), 409
+
+    try:
+        # Encode the latest frame as JPEG
+        ok, buffer = cv2.imencode('.jpg', latest_high_res_frame)
+        if not ok:
+            return jsonify({'status': 'error', 'message': 'Failed to encode JPEG'}), 500
+
+        filename = f"original-{int(time.time())}.jpg"
+        files = {'data': (filename, io.BytesIO(buffer.tobytes()), 'image/jpeg')}
+        headers = {'x-api-key': api_key}
+
+        if include_labels:
+            # Scale bounding boxes from inference/cropped space to original frame space
+            boxes_for_upload = []
+            orig_h, orig_w = int(latest_high_res_frame.shape[0]), int(latest_high_res_frame.shape[1])
+            inf_w, inf_h = (last_inference_frame_size or (orig_w, orig_h))
+
+            # Guard against division by zero
+            if inf_w <= 0 or inf_h <= 0:
+                inf_w, inf_h = orig_w, orig_h
+
+            scale_x = orig_w / inf_w
+            scale_y = orig_h / inf_h
+
+            for bb in (bounding_boxes or []):
+                x = int(round(int(bb.get('x', 0)) * scale_x))
+                y = int(round(int(bb.get('y', 0)) * scale_y))
+                w = int(round(int(bb.get('width', 0)) * scale_x))
+                h = int(round(int(bb.get('height', 0)) * scale_y))
+                boxes_for_upload.append({
+                    'x': x,
+                    'y': y,
+                    'width': w,
+                    'height': h,
+                    'label': str(bb.get('label', ''))
+                })
+
+            headers['x-bounding-boxes'] = json.dumps(boxes_for_upload)
+        url = EI_INGEST_URL + f"{category}/files"
+        resp = requests.post(url, files=files, headers=headers, params={'filename': filename}, timeout=30)
+
+        if 200 <= resp.status_code < 300:
+            return jsonify({'status': 'success'})
+
+        return jsonify({'status': 'error', 'message': resp.text, 'status_code': resp.status_code}), resp.status_code
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 if __name__ == '__main__':
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
