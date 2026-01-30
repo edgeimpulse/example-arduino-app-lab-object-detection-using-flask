@@ -78,31 +78,48 @@ def get_local_ip():
     finally:
         s.close()
 
-def init_runner():
-    """Initialize the Edge Impulse runner."""
-    global runner, MODEL_PATH, model_info
+def get_compatible_models():
+    """Return a list of model files compatible with the current system."""
     system = platform.system().lower()
     machine = platform.machine().lower()
-    print(f"Detected system: {system} {machine}")
     models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
-    available_models = [f for f in os.listdir(models_dir) if f.endswith('.eim')]
-    model_mapping = {
-        ('darwin', 'arm64'): "rubber-ducky-mac-arm64.eim",
-        ('linux', 'aarch64'): "rubber-ducky-linux-aarch64.eim"
-    }
-    model_name = next((model_file for (os_name, arch), model_file in model_mapping.items()
-                      if system == os_name and arch in machine), None)
-    if not model_name:
-        raise RuntimeError(f"Unsupported system: {system} {machine}. Only macOS (arm64) and Linux (aarch64) are supported.")
+    all_models = [f for f in os.listdir(models_dir) if f.endswith('.eim')]
+    compatible = []
+    if system == 'darwin' and 'arm64' in machine:
+        compatible = [f for f in all_models if 'mac-arm64' in f]
+    elif system == 'linux' and 'aarch64' in machine:
+        compatible = [f for f in all_models if 'linux-aarch64' in f]
+    return compatible
+
+def init_runner(model_name=None):
+    """Initialize the Edge Impulse runner with the given model name (or default)."""
+    global runner, MODEL_PATH, model_info, current_model_name
+    models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
+    compatible_models = get_compatible_models()
+    if not compatible_models:
+        raise RuntimeError("No compatible models found for this system.")
+    if model_name is None or model_name not in compatible_models:
+        model_name = compatible_models[0]
     model_path = os.path.join(models_dir, model_name)
     if not os.path.isfile(model_path):
-        raise FileNotFoundError(f"Required model {model_name} not found in {models_dir}. Available models: {available_models}")
+        raise FileNotFoundError(f"Model {model_name} not found in {models_dir}.")
     MODEL_PATH = model_path
+    current_model_name = model_name
     print(f"Selected model: {model_name}")
+    if runner:
+        runner.stop()
     runner = ImageImpulseRunner(MODEL_PATH)
     model_info = runner.init()
     print(f"Model info: {model_info}")
     print("Edge Impulse runner initialized.")
+
+# Track current model name
+current_model_name = None
+# Endpoint to get available models for dropdown
+@app.route('/get_models')
+def get_models():
+    """Return compatible model filenames for dropdown."""
+    return jsonify(get_compatible_models())
 
 def gen_video_frames():
     """Generate video frames from the selected source."""
@@ -333,8 +350,15 @@ def get_cameras():
 
 @app.route('/set_source', methods=['POST'])
 def set_source():
-    global source_change_requested, new_source_settings
+    global source_change_requested, new_source_settings, current_model_name
     data = request.get_json()
+    requested_model = data.get('modelName')
+    # If model changed, re-init runner
+    if requested_model and requested_model != current_model_name:
+        try:
+            init_runner(requested_model)
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)})
     new_source_settings = {
         'source': data.get('source', 'image'),
         'asset': data.get('asset', 'rubber-duckies.jpg'),

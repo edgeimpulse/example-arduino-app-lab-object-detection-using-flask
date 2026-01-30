@@ -12,29 +12,69 @@ This project demonstrates real-time object detection using Edge Impulse models a
 
 ## Quick Start (Arduino App Lab)
 
-1. **Connect** your Arduino UNO Q.
-2. **Clone this repo** into your ArduinoApps folder:
+1. Open the **Arduino App Lab** and **Connect** your Arduino UNO Q.
+2. SSH connexion: Click on the "terminal" icon on the bottom-left corner:
+   
+   ![App Lab - Open Terminal](/docs/app-lab-open-terminal.png)
+
+3. Go to the `ArduinoApp/` directory:
+
+```bash
+cd home/arduino/ArduinoApps/
+```
+
+4. **Clone this repo** into your ArduinoApps folder:
+
     ```bash
-    cd ArduinoApps/
-    git clone git@github.com:edgeimpulse/example-arduino-app-lab-object-detection-using-flask.git
+    git clone https://github.com/edgeimpulse/example-arduino-app-lab-object-detection-using-flask.git
     cd example-arduino-app-lab-object-detection-using-flask/
     ```
-3. **Make the model executable** (or add your own):
+
+5. In **Arduino App Lab**, go to **My Apps** (top-left corner). You should see the new application:
+
+    ![App Lab - My Apps](/docs/arduino-app-lab-new-app.png)
+
+6. **Make the models executable** (or add your own):
+
     ```bash
+    chmod +x models/rubber-ducky-linux-aarch64.eim 
     chmod +x models/rubber-ducky-fomo-linux-aarch64.eim
     ```
-4. **Start the app:**
+
+7. **Start the app:**
+   
     ```bash
     arduino-app-cli app start .
     ```
-5. **View logs (optional):**
+
+8. **View logs (optional):**
     ```bash
     arduino-app-cli app logs .
     ```
-6. **Stop the app:**
+
+9.  **Stop the app:**
     ```bash
     arduino-app-cli app stop .
     ```
+
+The logs will provide something similar to:
+
+```
+...
+Edge Impulse runner initialized.
+Server running at: http://172.18.0.2:5001
+* Serving Flask app 'main'
+* Debug mode: on
+```
+
+Note that this IP address is the internal docker network address. To get the local IP address of your UNO Q, use the following command:
+
+```bash
+hostname -I
+192.168.1.8 172.17.0.1 172.18.0.1 2a01:e0a:c6:14b0:c428:1d78:47e0:1f8e 
+```
+
+1.  Open a web browser using your local IP address, here in this case `192.168.1.8:5001`:
 
 ## Local Development
 

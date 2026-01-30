@@ -167,6 +167,12 @@
                     <div id="rtspError" class="error-message">Invalid RTSP URL format</div>
                 </div>
                 <div class="col-md-3">
+                    <label class="form-label">Model</label>
+                    <select id="modelSelect" class="form-select">
+                        <option value="" disabled selected>Loading models...</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
                     <button id="applyBtn" class="btn btn-primary w-100">Apply</button>
                 </div>
             </div>
@@ -214,6 +220,7 @@
             rtspUrl: document.getElementById('rtspUrl'),
             rtspError: document.getElementById('rtspError'),
             applyBtn: document.getElementById('applyBtn'),
+            modelSelect: document.getElementById('modelSelect'),
             originalLoader: document.getElementById('originalLoader'),
             detectionLoader: document.getElementById('detectionLoader'),
             originalFeed: document.getElementById('originalFeed'),
@@ -306,6 +313,34 @@
                 });
         }
 
+        function loadModels() {
+            const select = dom.modelSelect;
+            setSelectOptions(select, [], 'Loading models...');
+            fetch('/get_models')
+                .then(r => r.json())
+                .then(models => {
+                    if (models && models.length > 0) {
+                        const opts = models.map(m => {
+                            const o = document.createElement('option');
+                            o.value = m;
+                            o.textContent = m;
+                            return o;
+                        });
+                        setSelectOptions(select, opts, 'Select a model...');
+                        select.selectedIndex = 0;
+                    } else {
+                        setSelectOptions(select, [Object.assign(document.createElement('option'), {
+                            value: '', textContent: 'No models found', disabled: true
+                        })], 'Select a model...');
+                    }
+                })
+                .catch(() => {
+                    setSelectOptions(select, [Object.assign(document.createElement('option'), {
+                        value: '', textContent: 'Error loading models', disabled: true
+                    })], 'Select a model...');
+                });
+        }
+
         // --- Connection Status ---
         function updateConnectionStatus() {
             fetch('/get_connection_status')
@@ -351,6 +386,7 @@
         function handleApply() {
             const source = dom.sourceSelect.value;
             let asset = '', rtspUrl = '', cameraIndex = 0;
+            const modelName = dom.modelSelect.value;
             if (source === 'rtsp') {
                 rtspUrl = dom.rtspUrl.value;
                 if (!rtspUrl) return alert('Please enter an RTSP URL');
@@ -378,7 +414,7 @@
             fetch('/set_source', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ source, asset, rtspUrl, cameraIndex })
+                body: JSON.stringify({ source, asset, rtspUrl, cameraIndex, modelName })
             })
             .then(r => r.json())
             .then(data => {
@@ -416,6 +452,7 @@
             loadAssets('image', dom.imageSelect);
             loadAssets('video', dom.videoSelect);
             loadCameras();
+            loadModels();
             updateConnectionStatus();
             setInterval(updateConnectionStatus, 1000);
         });
