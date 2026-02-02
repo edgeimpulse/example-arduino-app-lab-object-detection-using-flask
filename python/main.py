@@ -1,15 +1,22 @@
+"""Flask app for Edge Impulse object detection demo."""
 
 # --- Imports ---
-import os
-import cv2
-import time
-import socket
-import logging
-import platform
-import requests
+# Standard library
 import io
 import json
-from flask import Flask, render_template, Response, request, jsonify
+import logging
+import os
+import platform
+import re
+import socket
+import time
+from pathlib import Path
+from urllib.parse import unquote
+
+# Third-party
+import cv2
+import requests
+from flask import Flask, Response, jsonify, render_template, request
 
 # --- App and Config ---
 from utils.mock_dependencies import apply_mocks
@@ -23,6 +30,7 @@ SCALE_FACTOR = 3  # Scale factor for resizing inference frames
 MAX_CAMERAS = 5
 MAX_RECONNECT_ATTEMPTS = 5
 EI_INGEST_URL = "https://ingestion.edgeimpulse.com/api/"
+EI_STUDIO_BASE_URL = "https://studio.edgeimpulse.com/v1"
 
 # --- Globals ---
 countObjects = 0
@@ -41,35 +49,6 @@ current_source = {
     'camera_index': 0,
     'connection_status': 'connecting'
 }
-source_change_requested = False
-new_source_settings = None
-
-from utils.mock_dependencies import apply_mocks
-apply_mocks()  # Apply mocks for six and pyaudio
-from edge_impulse_linux.image import ImageImpulseRunner
-
-app = Flask(__name__, static_folder='templates/assets')
-
-# --- Configuration ---
-SCALE_FACTOR = 3  # Scale factor for resizing inference frames
-
-# --- Global variables ---
-countObjects = 0
-inferenceSpeed = 0
-bounding_boxes = []
-latest_high_res_frame = None
-runner = None
-model_info = None
-
-# Source management
-current_source = {
-    'source': 'image',
-    'asset': 'rubber-duckies.jpg',
-    'rtsp_url': '',
-    'camera_index': 0,
-    'connection_status': 'connecting'
-}
-
 source_change_requested = False
 new_source_settings = None
 
@@ -96,6 +75,61 @@ def get_compatible_models():
     elif system == 'linux' and 'aarch64' in machine:
         compatible = [f for f in all_models if 'linux-aarch64' in f]
     return compatible
+
+def get_all_models():
+    """Return all local .eim models found in the models directory."""
+    models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
+    if not os.path.isdir(models_dir):
+        return []
+    return sorted([f for f in os.listdir(models_dir) if f.endswith('.eim')])
+
+def get_models_with_compatibility():
+    compatible = set(get_compatible_models())
+    return [{
+        'name': name,
+        'compatible': name in compatible
+    } for name in get_all_models()]
+
+def _ei_headers(api_key: str):
+    return {
+        'x-api-key': api_key,
+        'accept': 'application/json',
+    }
+
+def _ei_get(api_key: str, path: str, params=None, timeout=30):
+    url = EI_STUDIO_BASE_URL + path
+    return requests.get(url, headers=_ei_headers(api_key), params=params, timeout=timeout)
+
+def _ei_post(api_key: str, path: str, params=None, json_body=None, timeout=60):
+    url = EI_STUDIO_BASE_URL + path
+    return requests.post(url, headers={**_ei_headers(api_key), 'content-type': 'application/json'}, params=params, json=json_body, timeout=timeout)
+
+def _ei_detect_project(api_key: str):
+    resp = _ei_get(api_key, '/api/projects')
+    if not resp.ok:
+        raise RuntimeError(f"Failed to list projects ({resp.status_code}): {resp.text}")
+    data = resp.json() or {}
+    projects = data.get('projects') or []
+    if not projects:
+        raise RuntimeError('No projects found for this API key')
+    project = projects[0]
+    if 'id' not in project:
+        raise RuntimeError('Unexpected projects response (missing id)')
+    return {
+        'id': int(project['id']),
+        'name': str(project.get('name') or '')
+    }
+
+def _slugify_filename(value: str):
+    value = (value or '').strip().lower()
+    value = re.sub(r'[^a-z0-9\-_. ]+', '', value)
+    value = re.sub(r'\s+', '-', value).strip('-')
+    return value or 'model'
+
+def _ensure_executable(path: Path):
+    """Ensure file is executable (adds +x bits, preserves existing permissions)."""
+    st = path.stat()
+    os.chmod(path, st.st_mode | 0o111)
 
 def init_runner(model_name=None):
     """Initialize the Edge Impulse runner with the given model name (or default)."""
@@ -124,7 +158,14 @@ current_model_name = None
 # Endpoint to get available models for dropdown
 @app.route('/get_models')
 def get_models():
-    """Return compatible model filenames for dropdown."""
+    """Return model filenames for dropdown.
+
+    Backwards compatible:
+    - default: returns compatible model filenames (array of strings)
+    - if ?all=1: returns all models w/ compatibility metadata
+    """
+    if request.args.get('all') == '1':
+        return jsonify(get_models_with_compatibility())
     return jsonify(get_compatible_models())
 
 def gen_video_frames():
@@ -480,7 +521,329 @@ def upload_edge_impulse():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/ei/studio_info', methods=['POST'])
+def ei_studio_info():
+    """Return project info, impulses, and linux deployment targets for the API key."""
+    data = request.get_json() or {}
+    api_key = (data.get('apiKey') or '').strip()
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Missing API key'}), 400
+
+    try:
+        project = _ei_detect_project(api_key)
+        project_id = project['id']
+
+        impulses_resp = _ei_get(api_key, f'/api/{project_id}/impulses')
+        if not impulses_resp.ok:
+            return jsonify({'status': 'error', 'message': f"Failed to list impulses ({impulses_resp.status_code}): {impulses_resp.text}"}), 502
+        impulses_json = impulses_resp.json() or {}
+        impulses = impulses_json.get('impulses') or []
+        impulses = [{'id': int(i.get('id')), 'name': str(i.get('name') or f"Impulse {i.get('id')}")}
+                    for i in impulses if i.get('id') is not None]
+
+        targets_resp = _ei_get(api_key, f'/api/{project_id}/deployment/targets')
+        if not targets_resp.ok:
+            return jsonify({'status': 'error', 'message': f"Failed to list deployment targets ({targets_resp.status_code}): {targets_resp.text}"}), 502
+        targets_json = targets_resp.json() or {}
+        targets = targets_json.get('targets') or []
+
+        linux_targets = []
+        macos_targets = []
+        for t in targets:
+            hay = ' '.join([
+                str(t.get('format') or ''),
+                str(t.get('name') or ''),
+                str(t.get('description') or ''),
+                str(t.get('uiSection') or ''),
+            ]).lower()
+            entry = {
+                'format': str(t.get('format') or ''),
+                'name': str(t.get('name') or ''),
+                'description': str(t.get('description') or ''),
+                'preferredEngine': t.get('preferredEngine'),
+                'supportedEngines': t.get('supportedEngines') or [],
+            }
+            if not entry['format']:
+                continue
+            if 'linux' in hay:
+                linux_targets.append(entry)
+            # Heuristic: EI tends to use 'mac' in name/description/format.
+            if 'macos' in hay or 'mac os' in hay or re.search(r'\bmac\b', hay) or 'darwin' in hay:
+                macos_targets.append(entry)
+
+        linux_targets.sort(key=lambda x: (x.get('format') or '', x.get('name') or ''))
+        macos_targets.sort(key=lambda x: (x.get('format') or '', x.get('name') or ''))
+
+        return jsonify({
+            'status': 'success',
+            'project': project,
+            'impulses': impulses,
+            'linuxTargets': linux_targets,
+            'macosTargets': macos_targets,
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+
+@app.route('/ei/deployment/start', methods=['POST'])
+def ei_deployment_start():
+    """Start a deployment build job.
+    Uses a dedicated deployment API key (deployApiKey) when provided.
+    Adds logging for timing and key events.
+    """
+    data = request.get_json() or {}
+    api_key = (data.get('deployApiKey') or data.get('apiKey') or '').strip()
+    if not api_key:
+        app.logger.warning("[EI DEPLOY START] Missing API key")
+        return jsonify({'status': 'error', 'message': 'Missing API key'}), 400
+
+    try:
+        t0 = time.time()
+        project_id = int(data.get('projectId') or _ei_detect_project(api_key)['id'])
+        impulse_id = data.get('impulseId')
+        deployment_type = (data.get('deploymentType') or '').strip()
+        if impulse_id is not None:
+            impulse_id = int(impulse_id)
+        if not deployment_type:
+            app.logger.warning(f"[EI DEPLOY START] Missing deploymentType (project_id={project_id})")
+            return jsonify({'status': 'error', 'message': 'Missing deploymentType'}), 400
+
+        quantization = (data.get('quantization') or 'float32').strip().lower()
+        if quantization not in ['float32', 'int8']:
+            app.logger.warning(f"[EI DEPLOY START] Invalid quantization: {quantization} (project_id={project_id})")
+            return jsonify({'status': 'error', 'message': 'Invalid quantization (use float32 or int8)'}), 400
+
+        engine = 'tflite'
+        params = {'type': deployment_type}
+        if impulse_id is not None:
+            params['impulseId'] = impulse_id
+
+        app.logger.info(f"[EI DEPLOY START] Build requested: project_id={project_id}, impulse_id={impulse_id}, type={deployment_type}, quant={quantization}, engine={engine}")
+        t1 = time.time()
+        resp = _ei_post(
+            api_key,
+            f'/api/{project_id}/jobs/build-ondevice-model',
+            params=params,
+            json_body={'engine': engine, 'modelType': quantization},
+            timeout=60,
+        )
+        t2 = time.time()
+        app.logger.info(f"[EI DEPLOY START] Build POST returned in {t2-t1:.2f}s (status={resp.status_code})")
+        if not resp.ok:
+            app.logger.error(f"[EI DEPLOY START] Build failed: {resp.status_code} {resp.text}")
+            return jsonify({'status': 'error', 'message': f"Failed to start build job ({resp.status_code}): {resp.text}"}), 502
+        j = resp.json() or {}
+        app.logger.info(f"[EI DEPLOY START] Build job started: jobId={j.get('id')}, deploymentVersion={j.get('deploymentVersion')}, total={t2-t0:.2f}s")
+        return jsonify({
+            'status': 'success',
+            'projectId': project_id,
+            'deploymentType': deployment_type,
+            'engine': engine,
+            'quantization': quantization,
+            'jobId': j.get('id'),
+            'deploymentVersion': j.get('deploymentVersion'),
+        })
+    except Exception as e:
+        app.logger.exception(f"[EI DEPLOY START] Exception: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/ei/deployment/status', methods=['POST'])
+def ei_deployment_status():
+    """Poll job status and return all logs (not just a tail)."""
+    data = request.get_json() or {}
+    api_key = (data.get('deployApiKey') or data.get('apiKey') or '').strip()
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Missing API key'}), 400
+
+    try:
+        project_id = int(data.get('projectId') or _ei_detect_project(api_key)['id'])
+        job_id = data.get('jobId')
+        if job_id is None:
+            return jsonify({'status': 'error', 'message': 'Missing jobId'}), 400
+        job_id = int(job_id)
+
+        status_resp = _ei_get(api_key, f'/api/{project_id}/jobs/{job_id}/status', timeout=30)
+        if not status_resp.ok:
+            return jsonify({'status': 'error', 'message': f"Failed to get job status ({status_resp.status_code}): {status_resp.text}"}), 502
+        status_json = status_resp.json() or {}
+        job = (status_json.get('job') or {})
+
+        logs_all = []
+        try:
+            # Fetch all logs (no limit)
+            stdout_resp = _ei_get(api_key, f'/api/{project_id}/jobs/{job_id}/stdout', timeout=30)
+            if stdout_resp.ok:
+                stdout_json = stdout_resp.json() or {}
+                stdout = stdout_json.get('stdout') or []
+                logs_all = [str(x.get('data') or '') for x in stdout]
+        except Exception:
+            logs_all = []
+
+        finished = bool(job.get('finished'))
+        finished_successful = job.get('finishedSuccessful')
+
+        return jsonify({
+            'status': 'success',
+            'projectId': project_id,
+            'job': {
+                'id': job.get('id'),
+                'category': job.get('category'),
+                'created': job.get('created'),
+                'started': job.get('started'),
+                'finished': job.get('finished'),
+                'finishedSuccessful': finished_successful,
+            },
+            'finished': finished,
+            'success': bool(finished_successful) if finished else None,
+            'logsAll': logs_all,
+            'logsTail': logs_all[-10:] if logs_all else [],
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+
+@app.route('/ei/deployment/download', methods=['POST'])
+def ei_deployment_download():
+    """Download a deployment artifact (latest or specific version) and store it in models/.
+    Adds logging for timing and key events.
+    """
+    data = request.get_json() or {}
+    api_key = (data.get('deployApiKey') or data.get('apiKey') or '').strip()
+    if not api_key:
+        app.logger.warning("[EI DEPLOY DOWNLOAD] Missing API key")
+        return jsonify({'status': 'error', 'message': 'Missing API key'}), 400
+
+    try:
+        t0 = time.time()
+        project_id = int(data.get('projectId') or _ei_detect_project(api_key)['id'])
+        deployment_version = data.get('deploymentVersion')
+        deployment_type = str(data.get('deploymentType') or '').strip()
+        quantization = str(data.get('quantization') or 'float32').strip().lower()
+        engine = str(data.get('engine') or 'tflite').strip()
+        impulse_id = data.get('impulseId')
+        if impulse_id not in [None, '']:
+            try:
+                impulse_id = int(impulse_id)
+            except Exception:
+                impulse_id = None
+        else:
+            impulse_id = None
+
+        models_dir = Path(os.path.join(os.path.dirname(__file__), "..", "models")).resolve()
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        download_params = None
+        if deployment_version is not None:
+            try:
+                deployment_version = int(deployment_version)
+            except (TypeError, ValueError):
+                app.logger.warning(f"[EI DEPLOY DOWNLOAD] Invalid deploymentVersion: {deployment_version} (project_id={project_id})")
+                return jsonify({'status': 'error', 'message': 'deploymentVersion must be an integer', 'projectId': project_id}), 400
+        else:
+            if not deployment_type:
+                app.logger.warning(f"[EI DEPLOY DOWNLOAD] Missing deploymentType (project_id={project_id})")
+                return jsonify({'status': 'error', 'message': 'Missing deploymentType when deploymentVersion is not provided', 'projectId': project_id}), 400
+
+            info_params = {'type': deployment_type}
+            if quantization in ['float32', 'int8']:
+                info_params['modelType'] = quantization
+            if engine:
+                info_params['engine'] = engine
+            if impulse_id is not None:
+                info_params['impulseId'] = impulse_id
+
+            app.logger.info(f"[EI DEPLOY DOWNLOAD] Checking deployment info: project_id={project_id}, type={deployment_type}, quant={quantization}, engine={engine}, impulse_id={impulse_id}")
+            t1 = time.time()
+            info_resp = _ei_get(api_key, f'/api/{project_id}/deployment', params=info_params, timeout=30)
+            t2 = time.time()
+            app.logger.info(f"[EI DEPLOY DOWNLOAD] Deployment info GET returned in {t2-t1:.2f}s (status={info_resp.status_code})")
+            if info_resp.status_code == 404:
+                app.logger.info(f"[EI DEPLOY DOWNLOAD] No deployment found (404)")
+                return jsonify({'status': 'not-found', 'message': 'No deployment found matching the requested target', 'projectId': project_id}), 404
+            info_json = info_resp.json() or {}
+            if not info_resp.ok:
+                app.logger.error(f"[EI DEPLOY DOWNLOAD] Deployment info error: {info_resp.status_code} {info_resp.text}")
+                return jsonify({'status': 'error', 'message': f"Failed to check deployment info ({info_resp.status_code}): {info_resp.text}", 'projectId': project_id}), 502
+            if not info_json.get('success', True):
+                app.logger.error(f"[EI DEPLOY DOWNLOAD] Deployment info not successful: {info_json.get('error')}")
+                return jsonify({'status': 'error', 'message': info_json.get('error') or 'Deployment info request failed', 'projectId': project_id}), 502
+            if not info_json.get('hasDeployment'):
+                app.logger.info(f"[EI DEPLOY DOWNLOAD] No deployment found (hasDeployment false)")
+                return jsonify({'status': 'not-found', 'message': 'No deployment found matching the requested target', 'projectId': project_id}), 404
+            deployment_version = info_json.get('version')
+            if deployment_version is None:
+                app.logger.error(f"[EI DEPLOY DOWNLOAD] Deployment info response missing version")
+                return jsonify({'status': 'error', 'message': 'Deployment info response missing version', 'projectId': project_id}), 502
+            deployment_version = int(deployment_version)
+
+        rel_path = f'/api/{project_id}/deployment/history/{deployment_version}/download'
+        url = EI_STUDIO_BASE_URL + rel_path
+        app.logger.info(f"[EI DEPLOY DOWNLOAD] Downloading artifact: project_id={project_id}, version={deployment_version}, type={deployment_type}, quant={quantization}, engine={engine}, impulse_id={impulse_id}")
+        t3 = time.time()
+        r = requests.get(url, headers=_ei_headers(api_key), params=download_params, stream=True, timeout=120)
+        t4 = time.time()
+        app.logger.info(f"[EI DEPLOY DOWNLOAD] Download request returned in {t4-t3:.2f}s (status={r.status_code})")
+        if not r.ok:
+            app.logger.error(f"[EI DEPLOY DOWNLOAD] Download failed: {r.status_code} {r.text}")
+            return jsonify({'status': 'error', 'message': f"Failed to download deployment ({r.status_code}): {r.text}", 'projectId': project_id}), 502
+
+        filename = None
+        cd = r.headers.get('content-disposition')
+        if cd:
+            filename_basic = None
+            filename_star = None
+            for part in cd.split(';'):
+                part = part.strip()
+                if part.lower().startswith('filename*='):
+                    filename_star = part.split('=', 1)[1].strip()
+                elif part.lower().startswith('filename='):
+                    filename_basic = part.split('=', 1)[1].strip()
+            if filename_star:
+                value = filename_star.strip('"')
+                try:
+                    _, encoded = value.split("''", 1)
+                except ValueError:
+                    encoded = value
+                filename = unquote(encoded)
+            elif filename_basic:
+                filename = filename_basic.strip('"')
+        if filename:
+            filename = os.path.basename(filename)
+        if not filename:
+            if deployment_version is not None:
+                filename = f"deployment-{deployment_version}.eim"
+            else:
+                safe_type = _slugify_filename(deployment_type) or 'deployment'
+                filename = f"{safe_type}.eim"
+
+        out_path = models_dir / filename
+        t5 = time.time()
+        with open(out_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
+        t6 = time.time()
+        _ensure_executable(out_path)
+        app.logger.info(f"[EI DEPLOY DOWNLOAD] Saved artifact to {out_path} ({os.path.getsize(out_path)} bytes) in {t6-t5:.2f}s, total={t6-t0:.2f}s")
+
+        return jsonify({
+            'status': 'success',
+            'projectId': project_id,
+            'deploymentVersion': deployment_version,
+            'savedModels': [out_path.name],
+            'models': get_models_with_compatibility(),
+        })
+    except Exception as e:
+        app.logger.exception(f"[EI DEPLOY DOWNLOAD] Exception: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 if __name__ == '__main__':
+    # Ensure our app.logger.info(...) lines show up in the terminal
+    app.logger.setLevel(logging.INFO)
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
     init_runner()
     local_ip = get_local_ip()
