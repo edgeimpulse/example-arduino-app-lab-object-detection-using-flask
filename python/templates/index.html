@@ -208,6 +208,37 @@
                 </div>
             </div>
         </div>
+
+        <div class="settings-card">
+            <h5 class="mb-3">Upload to Edge Impulse</h5>
+            <div class="row align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label">Edge Impulse API Key</label>
+                    <input type="password" id="eiApiKey" class="form-control" placeholder="Enter API Key">
+                    <div id="apiKeySavedMsg" class="text-success" style="display:none;font-size:13px;">Saved!</div>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Category</label>
+                    <select id="eiCategory" class="form-select">
+                        <option value="training">Training</option>
+                        <option value="testing">Testing</option>
+                        <option value="split">Split</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Labels</label>
+                    <select id="eiLabelMode" class="form-select">
+                        <option value="none" selected>No Labels</option>
+                        <option value="bboxes">Bounding Boxes</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button id="eiUploadBtn" class="btn btn-success w-100">Upload</button>
+                    <div id="eiUploadMsg" style="font-size:13px;display:none;"></div>
+                </div>
+            </div>
+
+        </div>
     </div>
 
     <script>
@@ -235,7 +266,86 @@
             rtspGroup: document.getElementById('rtspGroup'),
             inferenceSpeed: document.getElementById('inferenceSpeed'),
             objectCount: document.getElementById('objectCount'),
+            eiApiKey: document.getElementById('eiApiKey'),
+            apiKeySavedMsg: document.getElementById('apiKeySavedMsg'),
+            eiCategory: document.getElementById('eiCategory'),
+            eiLabelMode: document.getElementById('eiLabelMode'),
+            eiUploadBtn: document.getElementById('eiUploadBtn'),
+            eiUploadMsg: document.getElementById('eiUploadMsg'),
         };
+
+        // --- API Key Storage ---
+        function saveApiKeyToStorage(key) {
+            localStorage.setItem('eiApiKey', key);
+        }
+        function getApiKeyFromStorage() {
+            return localStorage.getItem('eiApiKey') || '';
+        }
+        function showApiKeySaved() {
+            dom.apiKeySavedMsg.style.display = 'inline';
+            setTimeout(() => { dom.apiKeySavedMsg.style.display = 'none'; }, 1200);
+        }
+
+        // --- Upload Options Storage ---
+        function saveEiCategoryToStorage(value) {
+            localStorage.setItem('eiUploadCategory', value);
+        }
+        function getEiCategoryFromStorage() {
+            return localStorage.getItem('eiUploadCategory') || '';
+        }
+        function saveEiLabelModeToStorage(value) {
+            localStorage.setItem('eiUploadLabelMode', value);
+        }
+        function getEiLabelModeFromStorage() {
+            return localStorage.getItem('eiUploadLabelMode') || '';
+        }
+
+        // --- Edge Impulse Upload ---
+        function showEiUploadMsg(msg, success = true) {
+            dom.eiUploadMsg.textContent = msg;
+            dom.eiUploadMsg.style.display = 'block';
+            dom.eiUploadMsg.style.color = success ? '#198754' : '#dc3545';
+            setTimeout(() => { dom.eiUploadMsg.style.display = 'none'; }, 3000);
+        }
+
+        async function uploadCurrentOriginalFrame() {
+            const apiKey = (dom.eiApiKey.value || '').trim() || getApiKeyFromStorage();
+            const category = dom.eiCategory.value;
+            const includeLabels = (dom.eiLabelMode && dom.eiLabelMode.value === 'bboxes');
+            if (!apiKey) {
+                showEiUploadMsg('API key required', false);
+                return;
+            }
+
+            // Ensure storage is updated even if the input hasn't lost focus yet
+            if ((dom.eiApiKey.value || '').trim() && dom.eiApiKey.value !== getApiKeyFromStorage()) {
+                saveApiKeyToStorage(dom.eiApiKey.value);
+            }
+
+            // Persist category/label mode even if user clicks immediately
+            if (dom.eiCategory) saveEiCategoryToStorage(dom.eiCategory.value);
+            if (dom.eiLabelMode) saveEiLabelModeToStorage(dom.eiLabelMode.value);
+
+            dom.eiUploadBtn.disabled = true;
+            showEiUploadMsg('Uploading...', true);
+            try {
+                const resp = await fetch('/upload_edge_impulse', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ apiKey, category, includeLabels })
+                });
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                    showEiUploadMsg('Upload successful!', true);
+                } else {
+                    showEiUploadMsg('Upload failed: ' + (data.message || resp.statusText || 'Unknown error'), false);
+                }
+            } catch (e) {
+                showEiUploadMsg('Upload error', false);
+            } finally {
+                dom.eiUploadBtn.disabled = false;
+            }
+        }
 
         // --- Utility Functions ---
         function setSelectOptions(select, options, defaultText) {
@@ -449,6 +559,23 @@
 
         // --- Initialization ---
         document.addEventListener('DOMContentLoaded', function() {
+            // Load API key from storage
+            const savedKey = getApiKeyFromStorage();
+            if (savedKey) dom.eiApiKey.value = savedKey;
+            dom.eiApiKey.addEventListener('change', function() {
+                saveApiKeyToStorage(dom.eiApiKey.value);
+                showApiKeySaved();
+            });
+
+            // Restore upload options
+            const savedCategory = getEiCategoryFromStorage();
+            if (savedCategory && dom.eiCategory) dom.eiCategory.value = savedCategory;
+            const savedLabelMode = getEiLabelModeFromStorage();
+            if (savedLabelMode && dom.eiLabelMode) dom.eiLabelMode.value = savedLabelMode;
+
+            // Persist upload options when changed
+            if (dom.eiCategory) dom.eiCategory.addEventListener('change', () => saveEiCategoryToStorage(dom.eiCategory.value));
+            if (dom.eiLabelMode) dom.eiLabelMode.addEventListener('change', () => saveEiLabelModeToStorage(dom.eiLabelMode.value));
             loadAssets('image', dom.imageSelect);
             loadAssets('video', dom.videoSelect);
             loadCameras();
@@ -459,6 +586,7 @@
         dom.sourceSelect.addEventListener('change', handleSourceChange);
         dom.rtspUrl.addEventListener('input', handleRtspInput);
         dom.applyBtn.addEventListener('click', handleApply);
+        dom.eiUploadBtn.addEventListener('click', uploadCurrentOriginalFrame);
 
         // --- Stats EventSources ---
         const speedSource = new EventSource("/inference_speed");
