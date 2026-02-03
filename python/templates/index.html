@@ -213,7 +213,7 @@
             <h5 class="mb-3">Upload to Edge Impulse</h5>
             <div class="row align-items-end">
                 <div class="col-md-5">
-                    <label class="form-label">Edge Impulse API Key</label>
+                    <label class="form-label">Project API Key</label>
                     <input type="password" id="eiApiKey" class="form-control" placeholder="Enter API Key">
                     <div id="apiKeySavedMsg" class="text-success" style="display:none;font-size:13px;">Saved!</div>
                 </div>
@@ -238,6 +238,48 @@
                 </div>
             </div>
 
+        </div>
+
+        <div class="settings-card">
+            <h5 class="mb-3">Deploy Model from Edge Impulse</h5>
+            <div class="row align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label">Project API Key</label>
+                    <input type="password" id="eiDeployApiKey" class="form-control" placeholder="Enter API Key">
+                    <div id="deployApiKeySavedMsg" class="text-success" style="display:none;font-size:13px;">Saved!</div>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Impulse ID</label>
+                    <input type="text" id="eiDeployImpulseId" class="form-control" inputmode="numeric" placeholder="e.g. 1">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Deployment target</label>
+                    <select id="eiDeployTarget" class="form-select">
+                        <option value="runner-linux-aarch64" selected>runner-linux-aarch64 (default)</option>
+                        <option value="runner-linux-armv7">runner-linux-armv7</option>
+                        <option value="runner-linux-x86">runner-linux-x86</option>
+                        <option value="runner-mac-arm64">runner-mac-arm64</option>
+                        <option value="runner-mac-x86_64">runner-mac-x86_64</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Quantization</label>
+                    <select id="eiDeployQuant" class="form-select">
+                        <option value="float32" selected>float32 (default)</option>
+                        <option value="int8">int8</option>
+                    </select>
+                </div>
+                <div class="col-md-2" style="padding-top: 10px;">
+                    <div class="d-flex flex-row align-items-end gap-2">
+                        <button id="eiDeployDownloadBtn" class="btn btn-primary flex-fill">Download</button>
+                        <button id="eiDeployRebuildBtn" class="btn btn-outline-secondary" style="font-size:0.95em; min-width: 90px;">Rebuild</button>
+                    </div>
+                </div>
+            </div>
+            <div class="mt-2" style="font-size:13px;">
+                <div id="eiDeployMsg" style="display:none;"></div>
+                <pre id="eiDeployLogs" class="mt-2" style="display:none; max-height: 180px; overflow:auto; background:#f8f9fa; border:1px solid #dee2e6; padding:10px;"></pre>
+            </div>
         </div>
     </div>
 
@@ -272,6 +314,16 @@
             eiLabelMode: document.getElementById('eiLabelMode'),
             eiUploadBtn: document.getElementById('eiUploadBtn'),
             eiUploadMsg: document.getElementById('eiUploadMsg'),
+
+            eiDeployApiKey: document.getElementById('eiDeployApiKey'),
+            deployApiKeySavedMsg: document.getElementById('deployApiKeySavedMsg'),
+            eiDeployImpulseId: document.getElementById('eiDeployImpulseId'),
+            eiDeployTarget: document.getElementById('eiDeployTarget'),
+            eiDeployQuant: document.getElementById('eiDeployQuant'),
+            eiDeployDownloadBtn: document.getElementById('eiDeployDownloadBtn'),
+            eiDeployRebuildBtn: document.getElementById('eiDeployRebuildBtn'),
+            eiDeployMsg: document.getElementById('eiDeployMsg'),
+            eiDeployLogs: document.getElementById('eiDeployLogs'),
         };
 
         // --- API Key Storage ---
@@ -284,6 +336,39 @@
         function showApiKeySaved() {
             dom.apiKeySavedMsg.style.display = 'inline';
             setTimeout(() => { dom.apiKeySavedMsg.style.display = 'none'; }, 1200);
+        }
+
+        // --- Deployment API Key Storage ---
+        function saveDeployApiKeyToStorage(key) {
+            localStorage.setItem('eiDeployApiKey', key);
+        }
+        function getDeployApiKeyFromStorage() {
+            return localStorage.getItem('eiDeployApiKey') || '';
+        }
+        function showDeployApiKeySaved() {
+            dom.deployApiKeySavedMsg.style.display = 'inline';
+            setTimeout(() => { dom.deployApiKeySavedMsg.style.display = 'none'; }, 1200);
+        }
+
+        function saveDeployImpulseIdToStorage(value) {
+            localStorage.setItem('eiDeployImpulseId', String(value ?? '').trim());
+        }
+        function getDeployImpulseIdFromStorage() {
+            return localStorage.getItem('eiDeployImpulseId') || '';
+        }
+
+        function saveDeployTargetToStorage(value) {
+            localStorage.setItem('eiDeployTarget', String(value ?? '').trim());
+        }
+        function getDeployTargetFromStorage() {
+            return localStorage.getItem('eiDeployTarget') || '';
+        }
+
+        function saveDeployQuantToStorage(value) {
+            localStorage.setItem('eiDeployQuant', String(value ?? '').trim());
+        }
+        function getDeployQuantFromStorage() {
+            return localStorage.getItem('eiDeployQuant') || '';
         }
 
         // --- Upload Options Storage ---
@@ -306,6 +391,335 @@
             dom.eiUploadMsg.style.display = 'block';
             dom.eiUploadMsg.style.color = success ? '#198754' : '#dc3545';
             setTimeout(() => { dom.eiUploadMsg.style.display = 'none'; }, 3000);
+        }
+
+        // --- Edge Impulse Deploy ---
+        let eiDeployPollController = null;
+        let eiDeployPollAbortController = null;
+        let activeDeployRunId = 0;
+        let lastDeployLogs = [];
+        let cachedProjectId = null;
+        let downloadWaitTimer = null;
+        const EI_DEPLOY_ENGINE = 'tflite';
+        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+        async function safeJson(resp) {
+            try {
+                return await resp.json();
+            } catch {
+                return {};
+            }
+        }
+
+        function showEiDeployMsg(msg, success = true, keep = false) {
+            dom.eiDeployMsg.textContent = msg;
+            dom.eiDeployMsg.style.display = 'block';
+            dom.eiDeployMsg.style.color = success ? '#198754' : '#dc3545';
+            if (!keep) {
+                setTimeout(() => { dom.eiDeployMsg.style.display = 'none'; }, 4000);
+            }
+        }
+
+        // --- Logs streaming ---
+        function setEiDeployLogs(lines) {
+            // Show only new lines appended, but keep all lines in the box
+            if (!Array.isArray(lines)) lines = [];
+            // If logs are truncated, just show all
+            if (lines.length < lastDeployLogs.length) {
+                lastDeployLogs = [];
+            }
+            // Find the first difference
+            let firstNew = lines.length;
+            for (let i = 0; i < lines.length; ++i) {
+                if (lastDeployLogs[i] !== lines[i]) {
+                    firstNew = i;
+                    break;
+                }
+            }
+            // Append only new lines
+            const newLines = lines.slice(firstNew);
+            if (firstNew === 0) {
+                dom.eiDeployLogs.textContent = lines.join('\n');
+            } else if (newLines.length > 0) {
+                dom.eiDeployLogs.textContent += '\n' + newLines.join('\n');
+            }
+            // Always keep logs visible after a run until next action
+            dom.eiDeployLogs.style.display = lines.length ? 'block' : 'none';
+            lastDeployLogs = lines.slice();
+        }
+
+        function syncProjectIdFromResponse(data) {
+            if (!data) return;
+            const pid = data.projectId ?? data.projectID;
+            if (pid === undefined || pid === null) return;
+            const num = Number(pid);
+            if (Number.isFinite(num) && num > 0) {
+                cachedProjectId = num;
+            }
+        }
+
+        function withProjectId(payload) {
+            if (cachedProjectId) payload.projectId = cachedProjectId;
+            return payload;
+        }
+
+        function beginDownloadWaitHint() {
+            clearDownloadWaitHint();
+            downloadWaitTimer = setTimeout(() => {
+                showEiDeployMsg('Still downloading from Edge Impulse ...', true, true);
+            }, 8000);
+        }
+
+        function clearDownloadWaitHint() {
+            if (downloadWaitTimer) {
+                clearTimeout(downloadWaitTimer);
+                downloadWaitTimer = null;
+            }
+        }
+
+        function cancelActiveDeployPoll() {
+            if (eiDeployPollAbortController) {
+                eiDeployPollAbortController.abort();
+                eiDeployPollAbortController = null;
+            }
+            if (eiDeployPollController) {
+                eiDeployPollController.aborted = true;
+                eiDeployPollController = null;
+            }
+        }
+
+        function isCurrentDeployRun(runId) {
+            return runId === activeDeployRunId;
+        }
+
+        function setDeployButtonsDisabled(disabled, runId) {
+            if (!isCurrentDeployRun(runId)) return;
+            dom.eiDeployDownloadBtn.disabled = disabled;
+            dom.eiDeployRebuildBtn.disabled = disabled;
+        }
+
+        async function pollDeploymentUntilFinished(pollPayload, options = {}) {
+            const controller = { aborted: false };
+            eiDeployPollController = controller;
+
+            const abortController = new AbortController();
+            eiDeployPollAbortController = abortController;
+
+            const initialDelay = options.initialDelay ?? 400;
+            const maxDelay = options.maxDelay ?? 1600;
+            const backoff = options.backoff ?? 1.3;
+            let delay = initialDelay;
+
+            try {
+                while (!controller.aborted) {
+                    let stResp;
+                    try {
+                        stResp = await fetch('/ei/deployment/status', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(withProjectId(pollPayload)),
+                            signal: abortController.signal,
+                        });
+                    } catch (err) {
+                        if (err?.name === 'AbortError') {
+                            return { aborted: true };
+                        }
+                        return { error: err?.message || 'Network error while polling status' };
+                    }
+
+                    const stData = await safeJson(stResp);
+                    syncProjectIdFromResponse(stData);
+
+                    if (!stResp.ok || stData.status !== 'success') {
+                        return { error: stData?.message || stResp.statusText || 'Status error' };
+                    }
+
+                    setEiDeployLogs(stData.logsAll || stData.logsTail || []);
+
+                    if (stData.finished) {
+                        return { ok: stData.success === true };
+                    }
+
+                    await sleep(delay);
+                    delay = Math.min(maxDelay, Math.round(delay * backoff));
+                }
+
+                return { aborted: true };
+            } finally {
+                if (eiDeployPollAbortController === abortController) {
+                    eiDeployPollAbortController = null;
+                }
+                if (eiDeployPollController === controller) {
+                    eiDeployPollController = null;
+                }
+            }
+        }
+
+        async function deployDownloadOrBuild({forceRebuild = false} = {}) {
+            cancelActiveDeployPoll();
+            const runId = ++activeDeployRunId;
+            clearDownloadWaitHint();
+            // Clear logs only on new user action (not on build/download finish)
+            setEiDeployLogs([]);
+
+            // Persist current deploy settings immediately (even if user never blurred/changed focus)
+            if (dom.eiDeployImpulseId) saveDeployImpulseIdToStorage(dom.eiDeployImpulseId.value);
+            if (dom.eiDeployTarget) saveDeployTargetToStorage(dom.eiDeployTarget.value);
+            if (dom.eiDeployQuant) saveDeployQuantToStorage(dom.eiDeployQuant.value);
+
+            const deployApiKey = (dom.eiDeployApiKey.value || '').trim() || getDeployApiKeyFromStorage();
+            if (!deployApiKey) {
+                showEiDeployMsg('Deployment API key required', false);
+                setDeployButtonsDisabled(false, runId);
+                return;
+            }
+            if ((dom.eiDeployApiKey.value || '').trim() && dom.eiDeployApiKey.value !== getDeployApiKeyFromStorage()) {
+                saveDeployApiKeyToStorage(dom.eiDeployApiKey.value);
+            }
+
+            const impulseIdRaw = (dom.eiDeployImpulseId?.value || '').trim() || getDeployImpulseIdFromStorage();
+            let impulseId = null;
+            if (impulseIdRaw) {
+                const parsed = parseInt(impulseIdRaw, 10);
+                if (!Number.isFinite(parsed) || parsed <= 0) {
+                    showEiDeployMsg('Impulse ID must be a positive integer', false);
+                    setDeployButtonsDisabled(false, runId);
+                    return;
+                }
+                impulseId = parsed;
+                // Keep it persisted
+                saveDeployImpulseIdToStorage(String(parsed));
+            }
+
+            const deploymentType = dom.eiDeployTarget.value;
+            const quantization = dom.eiDeployQuant?.value || 'float32';
+            const enginePref = EI_DEPLOY_ENGINE;
+            if (!deploymentType) {
+                showEiDeployMsg('Select a deployment target', false);
+                setDeployButtonsDisabled(false, runId);
+                return;
+            }
+
+            setDeployButtonsDisabled(true, runId);
+            if (!forceRebuild) {
+                // Try to download existing deployment first
+                showEiDeployMsg('Checking for existing deployment...', true, true);
+                try {
+                    beginDownloadWaitHint();
+                    const dlResp = await fetch('/ei/deployment/download', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(withProjectId({
+                            deployApiKey,
+                            deploymentType,
+                            impulseId,
+                            quantization,
+                            engine: enginePref,
+                        }))
+                    });
+                    const dlData = await safeJson(dlResp);
+                    syncProjectIdFromResponse(dlData);
+                    if (dlResp.ok && dlData.status === 'success') {
+                        const saved = (dlData.savedModels || []).join(', ');
+                        showEiDeployMsg('Downloaded: ' + (saved || 'model'), true, true);
+                        loadModels();
+                        setDeployButtonsDisabled(false, runId);
+                        return;
+                    }
+                    // If not found, fall through to build
+                    showEiDeployMsg('No existing deployment found, building...', true, true);
+                } catch (e) {
+                    // Network or other error, fall through to build
+                    showEiDeployMsg('Could not reach deployment info, will build a new artifact...', false, true);
+                } finally {
+                    clearDownloadWaitHint();
+                }
+            } else {
+                showEiDeployMsg('Forcing rebuild...', true, true);
+            }
+
+            // Start build
+            try {
+                const startResp = await fetch('/ei/deployment/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(withProjectId({
+                        deployApiKey,
+                        deploymentType,
+                        quantization,
+                        impulseId,
+                    }))
+                });
+                const startData = await safeJson(startResp);
+                syncProjectIdFromResponse(startData);
+                if (!startResp.ok || startData.status !== 'success') {
+                    showEiDeployMsg('Failed to start build: ' + (startData.message || startResp.statusText), false);
+                    setDeployButtonsDisabled(false, runId);
+                    return;
+                }
+
+                const jobId = startData.jobId;
+                const deploymentVersion = startData.deploymentVersion;
+                const buildEngine = startData.engine || enginePref;
+                showEiDeployMsg(`Build started (job ${jobId}, engine ${buildEngine}, ${quantization}). Waiting for completion...`, true, true);
+
+                const handleBuildCompletion = async (wasSuccessful) => {
+                    if (!isCurrentDeployRun(runId)) return;
+                    if (!wasSuccessful) {
+                        showEiDeployMsg('Build failed. Check logs above.', false, true);
+                        setDeployButtonsDisabled(false, runId);
+                        return;
+                    }
+
+                    showEiDeployMsg('Build finished. Downloading artifact...', true, true);
+                    try {
+                        beginDownloadWaitHint();
+                        const dlResp = await fetch('/ei/deployment/download', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(withProjectId({
+                                deployApiKey,
+                                deploymentVersion,
+                                deploymentType,
+                                impulseId,
+                                quantization,
+                                engine: buildEngine,
+                            }))
+                        });
+                        const dlData = await safeJson(dlResp);
+                        syncProjectIdFromResponse(dlData);
+                        if (!dlResp.ok || dlData.status !== 'success') {
+                            showEiDeployMsg('Download failed: ' + (dlData.message || dlResp.statusText), false, true);
+                        } else {
+                            const saved = (dlData.savedModels || []).join(', ');
+                            showEiDeployMsg('Downloaded: ' + (saved || 'model'), true, true);
+                            loadModels();
+                        }
+                    } catch (e) {
+                        showEiDeployMsg('Download error', false, true);
+                    } finally {
+                        clearDownloadWaitHint();
+                        setDeployButtonsDisabled(false, runId);
+                    }
+                };
+
+                const pollResult = await pollDeploymentUntilFinished({ deployApiKey, jobId });
+                if (!isCurrentDeployRun(runId)) return;
+                if (pollResult?.error) {
+                    showEiDeployMsg('Status error: ' + pollResult.error, false, true);
+                    setDeployButtonsDisabled(false, runId);
+                    return;
+                }
+                if (pollResult?.aborted) {
+                    setDeployButtonsDisabled(false, runId);
+                    return;
+                }
+
+                await handleBuildCompletion(pollResult?.ok === true);
+            } catch (e) {
+                showEiDeployMsg('Error starting build', false);
+                setDeployButtonsDisabled(false, runId);
+            }
         }
 
         async function uploadCurrentOriginalFrame() {
@@ -426,18 +840,26 @@
         function loadModels() {
             const select = dom.modelSelect;
             setSelectOptions(select, [], 'Loading models...');
-            fetch('/get_models')
+            fetch('/get_models?all=1')
                 .then(r => r.json())
                 .then(models => {
                     if (models && models.length > 0) {
                         const opts = models.map(m => {
                             const o = document.createElement('option');
-                            o.value = m;
-                            o.textContent = m;
+                            if (typeof m === 'string') {
+                                o.value = m;
+                                o.textContent = m;
+                                return o;
+                            }
+                            o.value = m.name;
+                            o.textContent = m.compatible ? m.name : `${m.name} (incompatible)`;
+                            if (!m.compatible) o.disabled = true;
                             return o;
                         });
                         setSelectOptions(select, opts, 'Select a model...');
-                        select.selectedIndex = 0;
+                        // Prefer first compatible model
+                        const firstCompatible = (models || []).findIndex(x => typeof x === 'string' || x.compatible);
+                        select.selectedIndex = Math.max(0, firstCompatible);
                     } else {
                         setSelectOptions(select, [Object.assign(document.createElement('option'), {
                             value: '', textContent: 'No models found', disabled: true
@@ -567,6 +989,44 @@
                 showApiKeySaved();
             });
 
+            // Load deployment API key from storage
+            const savedDeployKey = getDeployApiKeyFromStorage();
+            if (savedDeployKey) dom.eiDeployApiKey.value = savedDeployKey;
+            dom.eiDeployApiKey.addEventListener('change', function() {
+                saveDeployApiKeyToStorage(dom.eiDeployApiKey.value);
+                showDeployApiKeySaved();
+            });
+
+            // Load deploy impulse ID from storage
+            const savedImpulseId = getDeployImpulseIdFromStorage();
+            if (savedImpulseId && dom.eiDeployImpulseId) dom.eiDeployImpulseId.value = savedImpulseId;
+            if (dom.eiDeployImpulseId) {
+                dom.eiDeployImpulseId.addEventListener('change', function() {
+                    saveDeployImpulseIdToStorage(dom.eiDeployImpulseId.value);
+                });
+            }
+
+            // Load deploy target + quantization from storage
+            const savedDeployTarget = getDeployTargetFromStorage();
+            if (savedDeployTarget && dom.eiDeployTarget) {
+                dom.eiDeployTarget.value = savedDeployTarget;
+            }
+            if (dom.eiDeployTarget) {
+                dom.eiDeployTarget.addEventListener('change', function() {
+                    saveDeployTargetToStorage(dom.eiDeployTarget.value);
+                });
+            }
+
+            const savedDeployQuant = getDeployQuantFromStorage();
+            if (savedDeployQuant && dom.eiDeployQuant) {
+                dom.eiDeployQuant.value = savedDeployQuant;
+            }
+            if (dom.eiDeployQuant) {
+                dom.eiDeployQuant.addEventListener('change', function() {
+                    saveDeployQuantToStorage(dom.eiDeployQuant.value);
+                });
+            }
+
             // Restore upload options
             const savedCategory = getEiCategoryFromStorage();
             if (savedCategory && dom.eiCategory) dom.eiCategory.value = savedCategory;
@@ -587,6 +1047,8 @@
         dom.rtspUrl.addEventListener('input', handleRtspInput);
         dom.applyBtn.addEventListener('click', handleApply);
         dom.eiUploadBtn.addEventListener('click', uploadCurrentOriginalFrame);
+        dom.eiDeployDownloadBtn.addEventListener('click', () => deployDownloadOrBuild({forceRebuild: false}));
+        dom.eiDeployRebuildBtn.addEventListener('click', () => deployDownloadOrBuild({forceRebuild: true}));
 
         // --- Stats EventSources ---
         const speedSource = new EventSource("/inference_speed");
