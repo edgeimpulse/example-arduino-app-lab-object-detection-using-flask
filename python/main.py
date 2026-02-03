@@ -22,6 +22,7 @@ from flask import Flask, Response, jsonify, render_template, request
 from utils.mock_dependencies import apply_mocks
 apply_mocks()  # Apply mocks for six and pyaudio
 from edge_impulse_linux.image import ImageImpulseRunner
+from utils.sort_tracker import SORTTracker
 
 app = Flask(__name__, static_folder='templates/assets')
 
@@ -40,6 +41,13 @@ latest_high_res_frame = None
 last_inference_frame_size = None  # (width, height) of the frame coordinates for bounding_boxes
 runner = None
 model_info = None
+tracking_enabled = False
+tracker = None
+tracking_settings = {
+    'max_age': 5,
+    'min_hits': 3,
+    'iou_threshold': 0.01
+}
 
 # Source management
 current_source = {
@@ -152,6 +160,11 @@ def init_runner(model_name=None):
     model_info = runner.init()
     print(f"Model info: {model_info}")
     print("Edge Impulse runner initialized.")
+
+def reset_tracker():
+    """Reset the object tracker state."""
+    global tracker
+    tracker = None
 
 # Track current model name
 current_model_name = None
@@ -316,11 +329,12 @@ def gen_inference_frames():
 
 def process_inference_result(res, cropped):
     """Process inference results and draw bounding boxes/centroids."""
-    global countObjects, bounding_boxes, inferenceSpeed, model_info
+    global countObjects, bounding_boxes, inferenceSpeed, model_info, tracking_enabled, tracker, tracking_settings
     countObjects = 0
     bounding_boxes.clear()
     inferenceSpeed = res['timing']['classification']
     model_type = model_info['model_parameters']['model_type']
+    detections = []
 
     if "bounding_boxes" in res["result"]:
         for bb in res["result"]["bounding_boxes"]:
@@ -338,6 +352,23 @@ def process_inference_result(res, cropped):
                     cropped = draw_bounding_box(cropped, bb)
                 elif model_type == 'constrained_object_detection':
                     cropped = draw_centroids(cropped, bb)
+                if tracking_enabled:
+                    x = float(bb['x'])
+                    y = float(bb['y'])
+                    w = float(bb['width'])
+                    h = float(bb['height'])
+                    detections.append([x + w / 2.0, y + h / 2.0, w, h])
+
+    if tracking_enabled:
+        if tracker is None:
+            tracker = SORTTracker(
+                max_age=int(tracking_settings.get('max_age', 5)),
+                min_hits=int(tracking_settings.get('min_hits', 3)),
+                iou_threshold=float(tracking_settings.get('iou_threshold', 0.01))
+            )
+        tracked_objects = tracker.update(detections)
+        for track_id, (cx, cy, w, h) in tracked_objects:
+            cropped = draw_track_overlay(cropped, track_id, cx, cy, w, h)
     return cropped
 
 def draw_bounding_box(cropped, bb):
@@ -359,6 +390,17 @@ def draw_centroids(cropped, bb):
     label_text = f"{bb['label']}: {bb['value']:.2f}"
     cv2.putText(cropped, label_text, (int(bb['x'] * SCALE_FACTOR), int(bb['y'] * SCALE_FACTOR) - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    return cropped
+
+def draw_track_overlay(cropped, track_id, cx, cy, w, h):
+    """Draw tracking ID overlay."""
+    x1 = int((cx - w / 2.0) * SCALE_FACTOR)
+    y1 = int((cy - h / 2.0) * SCALE_FACTOR)
+    x2 = int((cx + w / 2.0) * SCALE_FACTOR)
+    y2 = int((cy + h / 2.0) * SCALE_FACTOR)
+    cv2.rectangle(cropped, (x1, y1), (x2, y2), (255, 0, 0), 1)
+    cv2.putText(cropped, f"ID: {track_id}", (x1, max(0, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
     return cropped
 
 @app.route('/get_assets')
@@ -399,15 +441,36 @@ def get_cameras():
 
 @app.route('/set_source', methods=['POST'])
 def set_source():
-    global source_change_requested, new_source_settings, current_model_name
+    global source_change_requested, new_source_settings, current_model_name, tracking_enabled, tracking_settings
     data = request.get_json()
     requested_model = data.get('modelName')
     # If model changed, re-init runner
     if requested_model and requested_model != current_model_name:
         try:
             init_runner(requested_model)
+            reset_tracker()
         except Exception as e:
             return jsonify({'status': 'error', 'message': str(e)})
+    if 'trackObjects' in data:
+        new_tracking = bool(data.get('trackObjects'))
+        if new_tracking != tracking_enabled:
+            tracking_enabled = new_tracking
+            reset_tracker()
+    if 'trackMaxAge' in data or 'trackMinHits' in data or 'trackIouThreshold' in data:
+        try:
+            tracking_settings['max_age'] = max(1, int(data.get('trackMaxAge', tracking_settings['max_age'])))
+        except Exception:
+            tracking_settings['max_age'] = 5
+        try:
+            tracking_settings['min_hits'] = max(1, int(data.get('trackMinHits', tracking_settings['min_hits'])))
+        except Exception:
+            tracking_settings['min_hits'] = 3
+        try:
+            iou_val = float(data.get('trackIouThreshold', tracking_settings['iou_threshold']))
+            tracking_settings['iou_threshold'] = min(1.0, max(0.0, iou_val))
+        except Exception:
+            tracking_settings['iou_threshold'] = 0.01
+        reset_tracker()
     new_source_settings = {
         'source': data.get('source', 'image'),
         'asset': data.get('asset', 'rubber-duckies.jpg'),
