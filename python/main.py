@@ -364,7 +364,12 @@ def process_inference_result(res, cropped):
                     y = float(bb['y'])
                     w = float(bb['width'])
                     h = float(bb['height'])
-                    detections.append([x + w / 2.0, y + h / 2.0, w, h])
+                    track_w = w
+                    track_h = h
+                    if model_type == 'constrained_object_detection':
+                        track_w = w * 2.0
+                        track_h = h * 2.0
+                    detections.append([x + w / 2.0, y + h / 2.0, track_w, track_h])
 
     if tracking_enabled:
         t0 = time.perf_counter()
