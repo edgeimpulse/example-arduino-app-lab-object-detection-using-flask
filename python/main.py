@@ -36,6 +36,7 @@ EI_STUDIO_BASE_URL = "https://studio.edgeimpulse.com/v1"
 # --- Globals ---
 countObjects = 0
 inferenceSpeed = 0
+trackingPostprocessSpeed = 0
 bounding_boxes = []
 latest_high_res_frame = None
 last_inference_frame_size = None  # (width, height) of the frame coordinates for bounding_boxes
@@ -46,7 +47,7 @@ tracker = None
 tracking_settings = {
     'max_age': 5,
     'min_hits': 3,
-    'iou_threshold': 0.01
+    'iou_threshold': 0
 }
 
 # Source management
@@ -184,6 +185,7 @@ def get_models():
 def gen_video_frames():
     """Generate video frames from the selected source."""
     global latest_high_res_frame, current_source, source_change_requested, new_source_settings
+    global bounding_boxes, countObjects, last_inference_frame_size, trackingPostprocessSpeed
     cap = None
     reconnect_attempts = 0
     while True:
@@ -193,6 +195,11 @@ def gen_video_frames():
             if cap is not None:
                 cap.release()
                 time.sleep(0.5)
+            latest_high_res_frame = None
+            last_inference_frame_size = None
+            bounding_boxes.clear()
+            countObjects = 0
+            trackingPostprocessSpeed = 0
             current_source.update(new_source_settings)
             current_source['connection_status'] = 'connecting'
             print(f"Switched to source: {current_source}")
@@ -329,7 +336,7 @@ def gen_inference_frames():
 
 def process_inference_result(res, cropped):
     """Process inference results and draw bounding boxes/centroids."""
-    global countObjects, bounding_boxes, inferenceSpeed, model_info, tracking_enabled, tracker, tracking_settings
+    global countObjects, bounding_boxes, inferenceSpeed, trackingPostprocessSpeed, model_info, tracking_enabled, tracker, tracking_settings
     countObjects = 0
     bounding_boxes.clear()
     inferenceSpeed = res['timing']['classification']
@@ -360,15 +367,19 @@ def process_inference_result(res, cropped):
                     detections.append([x + w / 2.0, y + h / 2.0, w, h])
 
     if tracking_enabled:
+        t0 = time.perf_counter()
         if tracker is None:
             tracker = SORTTracker(
                 max_age=int(tracking_settings.get('max_age', 5)),
                 min_hits=int(tracking_settings.get('min_hits', 3)),
-                iou_threshold=float(tracking_settings.get('iou_threshold', 0.01))
+                iou_threshold=float(tracking_settings.get('iou_threshold', 0))
             )
         tracked_objects = tracker.update(detections)
         for track_id, (cx, cy, w, h) in tracked_objects:
             cropped = draw_track_overlay(cropped, track_id, cx, cy, w, h)
+        trackingPostprocessSpeed = round((time.perf_counter() - t0) * 1000, 2)
+    else:
+        trackingPostprocessSpeed = 0
     return cropped
 
 def draw_bounding_box(cropped, bb):
@@ -377,19 +388,19 @@ def draw_bounding_box(cropped, bb):
     y = int(bb['y'] * SCALE_FACTOR)
     width = int(bb['width'] * SCALE_FACTOR)
     height = int(bb['height'] * SCALE_FACTOR)
-    cv2.rectangle(cropped, (x, y), (x + width, y + height), (0, 255, 0), 2)
+    cv2.rectangle(cropped, (x, y), (x + width, y + height), (255, 0, 0), 2)
     label_text = f"{bb['label']}: {bb['value']:.2f}"
-    cv2.putText(cropped, label_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    cv2.putText(cropped, label_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
     return cropped
 
 def draw_centroids(cropped, bb):
     """Draw centroids for FOMO models."""
     center_x = int((bb['x'] + bb['width'] / 2) * SCALE_FACTOR)
     center_y = int((bb['y'] + bb['height'] / 2) * SCALE_FACTOR)
-    cv2.circle(cropped, (center_x, center_y), 10, (0, 255, 0), 2)
+    cv2.circle(cropped, (center_x, center_y), 10, (255, 0, 0), 2)
     label_text = f"{bb['label']}: {bb['value']:.2f}"
     cv2.putText(cropped, label_text, (int(bb['x'] * SCALE_FACTOR), int(bb['y'] * SCALE_FACTOR) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
     return cropped
 
 def draw_track_overlay(cropped, track_id, cx, cy, w, h):
@@ -398,8 +409,8 @@ def draw_track_overlay(cropped, track_id, cx, cy, w, h):
     y1 = int((cy - h / 2.0) * SCALE_FACTOR)
     x2 = int((cx + w / 2.0) * SCALE_FACTOR)
     y2 = int((cy + h / 2.0) * SCALE_FACTOR)
-    cv2.rectangle(cropped, (x1, y1), (x2, y2), (255, 0, 0), 1)
-    cv2.putText(cropped, f"ID: {track_id}", (x1, max(0, y1 - 10)),
+    # cv2.rectangle(cropped, (x1, y1), (x2, y2), (255, 0, 0), 1)
+    cv2.putText(cropped, f"ID: {track_id}", (x1, max(0, y1 - 30)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
     return cropped
 
@@ -509,6 +520,15 @@ def inference_speed():
     def generate():
         while True:
             yield f"data:{inferenceSpeed}\n\n"
+            time.sleep(0.1)
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/tracking_postprocess_speed')
+def tracking_postprocess_speed():
+    """Stream tracking postprocessing speed."""
+    def generate():
+        while True:
+            yield f"data:{trackingPostprocessSpeed}\n\n"
             time.sleep(0.1)
     return Response(generate(), mimetype='text/event-stream')
 

@@ -204,6 +204,7 @@
                 <div id="detectionError" class="error-message">Failed to load detection feed</div>
                 <div class="stats">
                     <div>Inference: <span id="inferenceSpeed" class="stats-value">0</span> ms</div>
+                    <div id="trackingSpeedRow" style="display:none;">Tracking: <span id="trackingSpeed" class="stats-value">0</span> ms</div>
                     <div>Objects: <span id="objectCount" class="stats-value">0</span></div>
                 </div>
             </div>
@@ -339,6 +340,8 @@
             cameraSelectGroup: document.getElementById('cameraSelectGroup'),
             rtspGroup: document.getElementById('rtspGroup'),
             inferenceSpeed: document.getElementById('inferenceSpeed'),
+            trackingSpeed: document.getElementById('trackingSpeed'),
+            trackingSpeedRow: document.getElementById('trackingSpeedRow'),
             objectCount: document.getElementById('objectCount'),
             eiApiKey: document.getElementById('eiApiKey'),
             apiKeySavedMsg: document.getElementById('apiKeySavedMsg'),
@@ -916,7 +919,9 @@
                         setSelectOptions(select, opts, 'Select a model...');
                         // Prefer first compatible model
                         const firstCompatible = (models || []).findIndex(x => typeof x === 'string' || x.compatible);
-                        select.selectedIndex = Math.max(0, firstCompatible);
+                        if (firstCompatible >= 0) {
+                            select.selectedIndex = firstCompatible + 1;
+                        }
                     } else {
                         setSelectOptions(select, [Object.assign(document.createElement('option'), {
                             value: '', textContent: 'No models found', disabled: true
@@ -1057,6 +1062,9 @@
                     el.style.display = enabled ? 'block' : 'none';
                 });
             }
+            if (dom.trackingSpeedRow) {
+                dom.trackingSpeedRow.style.display = enabled ? 'block' : 'none';
+            }
         }
 
         // --- Initialization ---
@@ -1170,6 +1178,11 @@
         const speedSource = new EventSource("/inference_speed");
         speedSource.onmessage = e => dom.inferenceSpeed.textContent = e.data;
         speedSource.onerror = () => { speedSource.close(); };
+        const trackingSpeedSource = new EventSource("/tracking_postprocess_speed");
+        trackingSpeedSource.onmessage = e => {
+            if (dom.trackingSpeed) dom.trackingSpeed.textContent = e.data;
+        };
+        trackingSpeedSource.onerror = () => { trackingSpeedSource.close(); };
         const countSource = new EventSource("/object_counter");
         countSource.onmessage = e => dom.objectCount.textContent = e.data;
         countSource.onerror = () => { countSource.close(); };
