@@ -6,6 +6,9 @@ This project demonstrates real-time object detection using Edge Impulse models a
 
 - Run Edge Impulse object detection models on images, videos, RTSP streams, or connected cameras
 - Live web UI for viewing results and switching sources
+- SORT object tracking with configurable parameters (for FOMO models, set IoU threshold to 0 for best results)
+- Upload images to your Edge Impulse project from the UI
+- Download and deploy new models directly from your Edge Impulse project
 - Easy setup for both Arduino App Lab and local development
 
 ![Demo overview](/docs/demo-overview-2.png)
@@ -105,6 +108,17 @@ hostname -I
 - Open your browser to the address shown in the terminal (default: http://localhost:5001)
 - Use the web UI to select input source (image, video, RTSP, or camera)
 - View original and detection results side by side
+- (Optional) Enable object tracking. For FOMO models, set IoU threshold to 0.
+- (Optional) Upload images to your Edge Impulse project. With FOMO models, bounding box sizes may need rework since FOMO focuses on object centers.
+- (Optional) Download a new model from your Edge Impulse project via the UI.
+
+## SORT Tracking Parameters
+
+The UI exposes the following parameters for the SORT tracker:
+
+- **Max age**: Maximum number of consecutive frames a track is kept alive without a matching detection. Higher values keep IDs stable through short occlusions but may keep stale tracks longer.
+- **Min hits**: Minimum number of matched detections before a track is considered confirmed and shown. Higher values reduce false positives but delay ID appearance.
+- **IoU threshold**: Minimum Intersection over Union required to associate a detection with an existing track. Higher values require tighter overlap; for FOMO models, set this to 0 because detections are centered points and do not represent full object extent.
 
 ## Notes
 

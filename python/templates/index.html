@@ -204,7 +204,35 @@
                 <div id="detectionError" class="error-message">Failed to load detection feed</div>
                 <div class="stats">
                     <div>Inference: <span id="inferenceSpeed" class="stats-value">0</span> ms</div>
+                    <div id="trackingSpeedRow" style="display:none;">Tracking: <span id="trackingSpeed" class="stats-value">0</span> ms</div>
                     <div>Objects: <span id="objectCount" class="stats-value">0</span></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-card">
+            <div class="row align-items-end">
+                <h5 class="mb-3">Object Tracking</h5>
+                <div class="col-md-3">
+                    
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="trackObjects">
+                        <label class="form-check-label" for="trackObjects">
+                            Track objects
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-3 track-param" style="display:none;">
+                    <label class="form-label">Max age</label>
+                    <input type="number" id="trackMaxAge" class="form-control" min="1" step="1" value="5">
+                </div>
+                <div class="col-md-3 track-param" style="display:none;">
+                    <label class="form-label">Min hits</label>
+                    <input type="number" id="trackMinHits" class="form-control" min="1" step="1" value="3">
+                </div>
+                <div class="col-md-3 track-param" style="display:none;">
+                    <label class="form-label">IoU threshold</label>
+                    <input type="number" id="trackIouThreshold" class="form-control" min="0" max="1" step="0.01" value="0.01">
                 </div>
             </div>
         </div>
@@ -294,6 +322,11 @@
             rtspError: document.getElementById('rtspError'),
             applyBtn: document.getElementById('applyBtn'),
             modelSelect: document.getElementById('modelSelect'),
+            trackObjects: document.getElementById('trackObjects'),
+            trackMaxAge: document.getElementById('trackMaxAge'),
+            trackMinHits: document.getElementById('trackMinHits'),
+            trackIouThreshold: document.getElementById('trackIouThreshold'),
+            trackParamGroups: document.querySelectorAll('.track-param'),
             originalLoader: document.getElementById('originalLoader'),
             detectionLoader: document.getElementById('detectionLoader'),
             originalFeed: document.getElementById('originalFeed'),
@@ -307,6 +340,8 @@
             cameraSelectGroup: document.getElementById('cameraSelectGroup'),
             rtspGroup: document.getElementById('rtspGroup'),
             inferenceSpeed: document.getElementById('inferenceSpeed'),
+            trackingSpeed: document.getElementById('trackingSpeed'),
+            trackingSpeedRow: document.getElementById('trackingSpeedRow'),
             objectCount: document.getElementById('objectCount'),
             eiApiKey: document.getElementById('eiApiKey'),
             apiKeySavedMsg: document.getElementById('apiKeySavedMsg'),
@@ -383,6 +418,31 @@
         }
         function getEiLabelModeFromStorage() {
             return localStorage.getItem('eiUploadLabelMode') || '';
+        }
+
+        function saveTrackObjectsToStorage(value) {
+            localStorage.setItem('trackObjects', value ? '1' : '0');
+        }
+        function getTrackObjectsFromStorage() {
+            return localStorage.getItem('trackObjects') === '1';
+        }
+        function saveTrackMaxAgeToStorage(value) {
+            localStorage.setItem('trackMaxAge', String(value ?? ''));
+        }
+        function getTrackMaxAgeFromStorage() {
+            return localStorage.getItem('trackMaxAge') || '5';
+        }
+        function saveTrackMinHitsToStorage(value) {
+            localStorage.setItem('trackMinHits', String(value ?? ''));
+        }
+        function getTrackMinHitsFromStorage() {
+            return localStorage.getItem('trackMinHits') || '3';
+        }
+        function saveTrackIouThresholdToStorage(value) {
+            localStorage.setItem('trackIouThreshold', String(value ?? ''));
+        }
+        function getTrackIouThresholdFromStorage() {
+            return localStorage.getItem('trackIouThreshold') || '0.01';
         }
 
         // --- Edge Impulse Upload ---
@@ -859,7 +919,9 @@
                         setSelectOptions(select, opts, 'Select a model...');
                         // Prefer first compatible model
                         const firstCompatible = (models || []).findIndex(x => typeof x === 'string' || x.compatible);
-                        select.selectedIndex = Math.max(0, firstCompatible);
+                        if (firstCompatible >= 0) {
+                            select.selectedIndex = firstCompatible + 1;
+                        }
                     } else {
                         setSelectOptions(select, [Object.assign(document.createElement('option'), {
                             value: '', textContent: 'No models found', disabled: true
@@ -919,6 +981,10 @@
             const source = dom.sourceSelect.value;
             let asset = '', rtspUrl = '', cameraIndex = 0;
             const modelName = dom.modelSelect.value;
+            const trackObjects = !!dom.trackObjects?.checked;
+            const trackMaxAge = parseInt(dom.trackMaxAge?.value || '5', 10);
+            const trackMinHits = parseInt(dom.trackMinHits?.value || '3', 10);
+            const trackIouThreshold = parseFloat(dom.trackIouThreshold?.value || '0.01');
             if (source === 'rtsp') {
                 rtspUrl = dom.rtspUrl.value;
                 if (!rtspUrl) return alert('Please enter an RTSP URL');
@@ -946,7 +1012,17 @@
             fetch('/set_source', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ source, asset, rtspUrl, cameraIndex, modelName })
+                body: JSON.stringify({
+                    source,
+                    asset,
+                    rtspUrl,
+                    cameraIndex,
+                    modelName,
+                    trackObjects,
+                    trackMaxAge,
+                    trackMinHits,
+                    trackIouThreshold
+                })
             })
             .then(r => r.json())
             .then(data => {
@@ -977,6 +1053,18 @@
                 showError(dom.originalError, true);
                 showError(dom.detectionError, true);
             });
+        }
+
+        function updateTrackParamVisibility() {
+            const enabled = !!dom.trackObjects?.checked;
+            if (dom.trackParamGroups) {
+                dom.trackParamGroups.forEach(el => {
+                    el.style.display = enabled ? 'block' : 'none';
+                });
+            }
+            if (dom.trackingSpeedRow) {
+                dom.trackingSpeedRow.style.display = enabled ? 'block' : 'none';
+            }
         }
 
         // --- Initialization ---
@@ -1033,6 +1121,42 @@
             const savedLabelMode = getEiLabelModeFromStorage();
             if (savedLabelMode && dom.eiLabelMode) dom.eiLabelMode.value = savedLabelMode;
 
+            // Restore tracking option
+            const savedTrack = getTrackObjectsFromStorage();
+            if (dom.trackObjects) dom.trackObjects.checked = savedTrack;
+            if (dom.trackObjects) {
+                dom.trackObjects.addEventListener('change', function() {
+                    saveTrackObjectsToStorage(dom.trackObjects.checked);
+                    updateTrackParamVisibility();
+                });
+            }
+
+            const savedTrackMaxAge = getTrackMaxAgeFromStorage();
+            if (dom.trackMaxAge) dom.trackMaxAge.value = savedTrackMaxAge;
+            if (dom.trackMaxAge) {
+                dom.trackMaxAge.addEventListener('change', function() {
+                    saveTrackMaxAgeToStorage(dom.trackMaxAge.value);
+                });
+            }
+
+            const savedTrackMinHits = getTrackMinHitsFromStorage();
+            if (dom.trackMinHits) dom.trackMinHits.value = savedTrackMinHits;
+            if (dom.trackMinHits) {
+                dom.trackMinHits.addEventListener('change', function() {
+                    saveTrackMinHitsToStorage(dom.trackMinHits.value);
+                });
+            }
+
+            const savedTrackIou = getTrackIouThresholdFromStorage();
+            if (dom.trackIouThreshold) dom.trackIouThreshold.value = savedTrackIou;
+            if (dom.trackIouThreshold) {
+                dom.trackIouThreshold.addEventListener('change', function() {
+                    saveTrackIouThresholdToStorage(dom.trackIouThreshold.value);
+                });
+            }
+
+            updateTrackParamVisibility();
+
             // Persist upload options when changed
             if (dom.eiCategory) dom.eiCategory.addEventListener('change', () => saveEiCategoryToStorage(dom.eiCategory.value));
             if (dom.eiLabelMode) dom.eiLabelMode.addEventListener('change', () => saveEiLabelModeToStorage(dom.eiLabelMode.value));
@@ -1054,6 +1178,11 @@
         const speedSource = new EventSource("/inference_speed");
         speedSource.onmessage = e => dom.inferenceSpeed.textContent = e.data;
         speedSource.onerror = () => { speedSource.close(); };
+        const trackingSpeedSource = new EventSource("/tracking_postprocess_speed");
+        trackingSpeedSource.onmessage = e => {
+            if (dom.trackingSpeed) dom.trackingSpeed.textContent = e.data;
+        };
+        trackingSpeedSource.onerror = () => { trackingSpeedSource.close(); };
         const countSource = new EventSource("/object_counter");
         countSource.onmessage = e => dom.objectCount.textContent = e.data;
         countSource.onerror = () => { countSource.close(); };
